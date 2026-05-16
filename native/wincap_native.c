@@ -205,6 +205,14 @@ typedef struct BurstPerfScope
     HANDLE mmcss;
 } BurstPerfScope;
 
+typedef struct DxgiDeviceCache
+{
+    RECT bounds;
+    ID3D11Device *device;
+    ID3D11DeviceContext *context;
+    IDXGIOutput1 *output;
+} DxgiDeviceCache;
+
 typedef UINT MMRESULT;
 typedef MMRESULT (WINAPI *TimeBeginPeriodProc)(UINT period);
 typedef MMRESULT (WINAPI *TimeEndPeriodProc)(UINT period);
@@ -232,6 +240,7 @@ static HMODULE g_winmmModule;
 static HMODULE g_avrtModule;
 static AvSetMmThreadCharacteristicsProc g_avSetMmThreadCharacteristics;
 static AvRevertMmThreadCharacteristicsProc g_avRevertMmThreadCharacteristics;
+static DxgiDeviceCache g_dxgiCache;
 
 static TimeBeginPeriodProc g_timeBeginPeriod;
 static TimeEndPeriodProc g_timeEndPeriod;
@@ -1702,6 +1711,65 @@ static BOOL RectsEqual(RECT left, RECT right)
         left.bottom == right.bottom;
 }
 
+static void ReleaseDxgiDeviceCache(void)
+{
+    if (g_dxgiCache.output)
+    {
+        IDXGIOutput1_Release(g_dxgiCache.output);
+    }
+    if (g_dxgiCache.context)
+    {
+        ID3D11DeviceContext_Release(g_dxgiCache.context);
+    }
+    if (g_dxgiCache.device)
+    {
+        ID3D11Device_Release(g_dxgiCache.device);
+    }
+    ZeroMemory(&g_dxgiCache, sizeof(g_dxgiCache));
+}
+
+static void StoreDxgiDeviceCache(RECT bounds, ID3D11Device *device, ID3D11DeviceContext *context, IDXGIOutput1 *output)
+{
+    ReleaseDxgiDeviceCache();
+    g_dxgiCache.bounds = bounds;
+    g_dxgiCache.device = device;
+    g_dxgiCache.context = context;
+    g_dxgiCache.output = output;
+    ID3D11Device_AddRef(g_dxgiCache.device);
+    ID3D11DeviceContext_AddRef(g_dxgiCache.context);
+    IDXGIOutput1_AddRef(g_dxgiCache.output);
+}
+
+static BOOL TryCreateDxgiDuplicationFromCache(
+    RECT bounds,
+    ID3D11Device **deviceOut,
+    ID3D11DeviceContext **contextOut,
+    IDXGIOutputDuplication **duplicationOut)
+{
+    IDXGIOutputDuplication *duplication = 0;
+
+    if (!g_dxgiCache.device ||
+        !g_dxgiCache.context ||
+        !g_dxgiCache.output ||
+        !RectsEqual(g_dxgiCache.bounds, bounds))
+    {
+        return FALSE;
+    }
+
+    if (FAILED(IDXGIOutput1_DuplicateOutput(g_dxgiCache.output, (IUnknown *)g_dxgiCache.device, &duplication)))
+    {
+        ReleaseDxgiDeviceCache();
+        return FALSE;
+    }
+
+    ID3D11Device_AddRef(g_dxgiCache.device);
+    ID3D11DeviceContext_AddRef(g_dxgiCache.context);
+    *deviceOut = g_dxgiCache.device;
+    *contextOut = g_dxgiCache.context;
+    *duplicationOut = duplication;
+    return TRUE;
+}
+
 static BOOL CreateDxgiDuplicationForBounds(
     RECT bounds,
     ID3D11Device **deviceOut,
@@ -1726,6 +1794,11 @@ static BOOL CreateDxgiDuplicationForBounds(
     *deviceOut = 0;
     *contextOut = 0;
     *duplicationOut = 0;
+
+    if (TryCreateDxgiDuplicationFromCache(bounds, deviceOut, contextOut, duplicationOut))
+    {
+        return TRUE;
+    }
 
     hr = CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory);
     if (FAILED(hr))
@@ -1761,6 +1834,7 @@ static BOOL CreateDxgiDuplicationForBounds(
                     SUCCEEDED(IDXGIOutput_QueryInterface(output, &IID_IDXGIOutput1, (void **)&output1)) &&
                     SUCCEEDED(IDXGIOutput1_DuplicateOutput(output1, (IUnknown *)device, &duplication)))
                 {
+                    StoreDxgiDeviceCache(bounds, device, context, output1);
                     found = TRUE;
                 }
             }
@@ -2846,6 +2920,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     case WM_DESTROY:
         FreeBitmapImage(&g_image);
         FreeStrokes();
+        ReleaseDxgiDeviceCache();
         FreeMem(g_scratchPoints);
         g_scratchPoints = 0;
         g_scratchPointCapacity = 0;
@@ -2958,7 +3033,8 @@ static int RunDxgiSelfTest(void)
     CaptureTarget target;
     WCHAR folder[MAX_PATH];
     WCHAR path[MAX_PATH];
-    int saved;
+    int firstSaved;
+    int secondSaved;
 
     point.x = 0;
     point.y = 0;
@@ -2979,14 +3055,15 @@ static int RunDxgiSelfTest(void)
     target.mode = MODE_DISPLAY;
     target.bounds = monitorInfo.rcMonitor;
 
-    saved = CaptureBurstFrames(&target, 1, 500, folder);
+    firstSaved = CaptureBurstFrames(&target, 1, 500, folder);
+    secondSaved = CaptureBurstFrames(&target, 1, 500, folder);
     MakeFramePath(folder, 0, path);
     DeleteFileW(path);
     MakeFramePath(folder, 1, path);
     DeleteFileW(path);
     RemoveDirectoryW(folder);
 
-    return saved >= 1 && g_lastBurstUsedDxgi ? 0 : 2;
+    return firstSaved >= 1 && secondSaved >= 1 && g_lastBurstUsedDxgi ? 0 : 2;
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previousInstance, PWSTR commandLine, int showCommand)
