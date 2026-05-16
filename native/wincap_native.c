@@ -5,6 +5,10 @@
 #include <windowsx.h>
 #include <commdlg.h>
 
+#ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
+#define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
+#endif
+
 #pragma function(memset)
 #pragma function(memcpy)
 
@@ -180,7 +184,16 @@ typedef struct BurstFrame
 {
     BYTE *bits;
     DWORD bytes;
+    BOOL valid;
 } BurstFrame;
+
+typedef struct BurstFrameStore
+{
+    BurstFrame *frames;
+    BYTE *block;
+    DWORD frameBytes;
+    int count;
+} BurstFrameStore;
 
 typedef struct BurstPerfScope
 {
@@ -189,6 +202,12 @@ typedef struct BurstPerfScope
     HMODULE avrt;
     HANDLE mmcss;
 } BurstPerfScope;
+
+typedef UINT MMRESULT;
+typedef MMRESULT (WINAPI *TimeBeginPeriodProc)(UINT period);
+typedef MMRESULT (WINAPI *TimeEndPeriodProc)(UINT period);
+typedef HANDLE (WINAPI *AvSetMmThreadCharacteristicsProc)(LPCWSTR taskName, LPDWORD taskIndex);
+typedef BOOL (WINAPI *AvRevertMmThreadCharacteristicsProc)(HANDLE handle);
 
 static HINSTANCE g_instance;
 static HWND g_main;
@@ -204,12 +223,12 @@ static MonitorItem g_monitors[MAX_MONITORS];
 static int g_monitorCount;
 static BOOL g_monitorsLoaded;
 static WCHAR g_lastBurstFolder[MAX_PATH];
-
-typedef UINT MMRESULT;
-typedef MMRESULT (WINAPI *TimeBeginPeriodProc)(UINT period);
-typedef MMRESULT (WINAPI *TimeEndPeriodProc)(UINT period);
-typedef HANDLE (WINAPI *AvSetMmThreadCharacteristicsProc)(LPCWSTR taskName, LPDWORD taskIndex);
-typedef BOOL (WINAPI *AvRevertMmThreadCharacteristicsProc)(HANDLE handle);
+static POINT *g_scratchPoints;
+static int g_scratchPointCapacity;
+static HMODULE g_winmmModule;
+static HMODULE g_avrtModule;
+static AvSetMmThreadCharacteristicsProc g_avSetMmThreadCharacteristics;
+static AvRevertMmThreadCharacteristicsProc g_avRevertMmThreadCharacteristics;
 
 static TimeBeginPeriodProc g_timeBeginPeriod;
 static TimeEndPeriodProc g_timeEndPeriod;
@@ -258,12 +277,38 @@ static void *AllocZero(SIZE_T size)
     return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
 }
 
+static void *AllocMem(SIZE_T size)
+{
+    return HeapAlloc(GetProcessHeap(), 0, size);
+}
+
 static void FreeMem(void *memory)
 {
     if (memory)
     {
         HeapFree(GetProcessHeap(), 0, memory);
     }
+}
+
+static POINT *GetScratchPoints(int count)
+{
+    POINT *next;
+    if (count <= 0)
+    {
+        return 0;
+    }
+    if (count > g_scratchPointCapacity)
+    {
+        next = (POINT *)AllocMem(sizeof(POINT) * count);
+        if (!next)
+        {
+            return 0;
+        }
+        FreeMem(g_scratchPoints);
+        g_scratchPoints = next;
+        g_scratchPointCapacity = count;
+    }
+    return g_scratchPoints;
 }
 
 static void SetStatusText(const WCHAR *text)
@@ -448,8 +493,7 @@ static BOOL SaveBmpBits(const WCHAR *path, int width, int height, int stride, co
     DWORD written;
     DWORD pixelBytes;
     DWORD fileBytes;
-    BYTE *buffer;
-    BYTE *cursor;
+    BYTE header[sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER)];
     BOOL ok;
 
     if (!bits || width <= 0 || height <= 0 || stride <= 0)
@@ -472,29 +516,18 @@ static BOOL SaveBmpBits(const WCHAR *path, int width, int height, int stride, co
     infoHeader.biCompression = BI_RGB;
     infoHeader.biSizeImage = pixelBytes;
 
-    buffer = (BYTE *)AllocZero(fileBytes);
-    if (!buffer)
-    {
-        return FALSE;
-    }
-
-    cursor = buffer;
-    CopyMemory(cursor, &fileHeader, sizeof(fileHeader));
-    cursor += sizeof(fileHeader);
-    CopyMemory(cursor, &infoHeader, sizeof(infoHeader));
-    cursor += sizeof(infoHeader);
-    CopyMemory(cursor, bits, pixelBytes);
+    CopyMemory(header, &fileHeader, sizeof(fileHeader));
+    CopyMemory(header + sizeof(fileHeader), &infoHeader, sizeof(infoHeader));
 
     file = CreateFileW(path, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
     if (file == INVALID_HANDLE_VALUE)
     {
-        FreeMem(buffer);
         return FALSE;
     }
 
-    ok = WriteFile(file, buffer, fileBytes, &written, 0) && written == fileBytes;
+    ok = WriteFile(file, header, sizeof(header), &written, 0) && written == sizeof(header);
+    ok = ok && WriteFile(file, bits, pixelBytes, &written, 0) && written == pixelBytes;
     CloseHandle(file);
-    FreeMem(buffer);
     return ok;
 }
 
@@ -568,7 +601,7 @@ static void ClearPixels(DWORD *row, int start, int end)
     }
 }
 
-static void ApplyFreeformMask(BitmapImage *image, RECT bounds, const POINT *points, int count)
+static void ApplyFreeformMaskWithNodes(BitmapImage *image, RECT bounds, const POINT *points, int count, int *nodes)
 {
     int y;
     int i;
@@ -577,10 +610,8 @@ static void ApplyFreeformMask(BitmapImage *image, RECT bounds, const POINT *poin
     int left;
     int right;
     int clearStart;
-    int *nodes;
     DWORD *row;
 
-    nodes = (int *)AllocZero(sizeof(int) * count);
     if (!nodes)
     {
         return;
@@ -619,7 +650,18 @@ static void ApplyFreeformMask(BitmapImage *image, RECT bounds, const POINT *poin
         }
         ClearPixels(row, clearStart, image->width);
     }
+}
 
+static void ApplyFreeformMask(BitmapImage *image, RECT bounds, const POINT *points, int count)
+{
+    int *nodes;
+
+    nodes = (int *)AllocMem(sizeof(int) * count);
+    if (!nodes)
+    {
+        return;
+    }
+    ApplyFreeformMaskWithNodes(image, bounds, points, count, nodes);
     FreeMem(nodes);
 }
 
@@ -716,7 +758,7 @@ static void DrawStrokes(HDC dc, RECT destination, int imageWidth, int imageHeigh
         {
             continue;
         }
-        scaled = (POINT *)AllocZero(sizeof(POINT) * stroke->count);
+        scaled = GetScratchPoints(stroke->count);
         if (!scaled)
         {
             continue;
@@ -740,7 +782,6 @@ static void DrawStrokes(HDC dc, RECT destination, int imageWidth, int imageHeigh
         }
         SelectObject(dc, oldPen);
         DeleteObject(pen);
-        FreeMem(scaled);
     }
 }
 
@@ -1248,7 +1289,7 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
             oldPen = SelectObject(dc, pen);
             if (state->mode == MODE_FREEFORM && state->points.count > 1)
             {
-                clientPoints = (POINT *)AllocZero(sizeof(POINT) * state->points.count);
+                clientPoints = GetScratchPoints(state->points.count);
                 if (clientPoints)
                 {
                     for (i = 0; i < state->points.count; ++i)
@@ -1256,7 +1297,6 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
                         clientPoints[i] = OverlayScreenToClientPoint(state, state->points.items[i]);
                     }
                     Polyline(dc, clientPoints, state->points.count);
-                    FreeMem(clientPoints);
                 }
             }
             else if (state->mode != MODE_FREEFORM)
@@ -1433,46 +1473,79 @@ static void MakeFramePath(const WCHAR *folder, int index, WCHAR *path)
     lstrcatW(path, name);
 }
 
-static BOOL StoreBurstFrame(BurstFrame *frames, int index, const BitmapImage *image)
+static BOOL CreateBurstFrameStore(BurstFrameStore *store, int frameCount, DWORD frameBytes)
 {
-    DWORD bytes = (DWORD)(image->stride * image->height);
-    frames[index].bits = (BYTE *)AllocZero(bytes);
-    if (!frames[index].bits)
+    int i;
+    ULONGLONG totalBytes;
+    ZeroMemory(store, sizeof(*store));
+    if (frameCount <= 0 || frameBytes == 0)
     {
         return FALSE;
     }
-    CopyMemory(frames[index].bits, image->bits, bytes);
-    frames[index].bytes = bytes;
+    totalBytes = (ULONGLONG)frameCount * (ULONGLONG)frameBytes;
+    if (totalBytes > (SIZE_T)-1)
+    {
+        return FALSE;
+    }
+    store->frames = (BurstFrame *)AllocZero(sizeof(BurstFrame) * frameCount);
+    store->block = (BYTE *)AllocMem((SIZE_T)totalBytes);
+    if (!store->frames || !store->block)
+    {
+        FreeMem(store->frames);
+        FreeMem(store->block);
+        ZeroMemory(store, sizeof(*store));
+        return FALSE;
+    }
+    store->frameBytes = frameBytes;
+    store->count = frameCount;
+    for (i = 0; i < frameCount; ++i)
+    {
+        store->frames[i].bits = store->block + ((SIZE_T)i * frameBytes);
+        store->frames[i].bytes = frameBytes;
+    }
     return TRUE;
 }
 
-static void FreeBurstFrames(BurstFrame *frames, int count)
+static BOOL StoreBurstFrame(BurstFrameStore *store, int index, const BitmapImage *image)
 {
-    int i;
-    if (!frames)
+    DWORD bytes = (DWORD)(image->stride * image->height);
+    if (!store || !store->frames || index < 0 || index >= store->count || bytes != store->frameBytes)
+    {
+        return FALSE;
+    }
+    CopyMemory(store->frames[index].bits, image->bits, bytes);
+    store->frames[index].valid = TRUE;
+    return TRUE;
+}
+
+static void FreeBurstFrameStore(BurstFrameStore *store)
+{
+    if (!store)
     {
         return;
     }
-    for (i = 0; i < count; ++i)
-    {
-        FreeMem(frames[i].bits);
-    }
-    FreeMem(frames);
+    FreeMem(store->block);
+    FreeMem(store->frames);
+    ZeroMemory(store, sizeof(*store));
 }
 
-static int FlushBurstFrames(BurstFrame *frames, int count, int width, int height, int stride, const WCHAR *folder)
+static int FlushBurstFrameStore(BurstFrameStore *store, int width, int height, int stride, const WCHAR *folder)
 {
     int i;
     int saved = 0;
     WCHAR path[MAX_PATH];
-    for (i = 0; i < count; ++i)
+    if (!store || !store->frames)
     {
-        if (!frames[i].bits)
+        return 0;
+    }
+    for (i = 0; i < store->count; ++i)
+    {
+        if (!store->frames[i].valid || !store->frames[i].bits)
         {
             continue;
         }
         MakeFramePath(folder, i, path);
-        if (SaveBmpBits(path, width, height, stride, frames[i].bits))
+        if (SaveBmpBits(path, width, height, stride, store->frames[i].bits))
         {
             ++saved;
         }
@@ -1489,50 +1562,47 @@ static BOOL ShouldBufferBurst(int frameCount, DWORD frameBytes)
 static void BeginBurstPerfScope(BurstPerfScope *scope)
 {
     DWORD taskIndex = 0;
-    AvSetMmThreadCharacteristicsProc setMmcss;
-    HMODULE winmm;
     ZeroMemory(scope, sizeof(*scope));
     scope->oldPriorityClass = GetPriorityClass(GetCurrentProcess());
     scope->oldThreadPriority = GetThreadPriority(GetCurrentThread());
 
-    winmm = LoadLibraryW(L"winmm.dll");
-    if (winmm)
+    if (!g_winmmModule)
     {
-        g_timeBeginPeriod = (TimeBeginPeriodProc)GetProcAddress(winmm, "timeBeginPeriod");
-        g_timeEndPeriod = (TimeEndPeriodProc)GetProcAddress(winmm, "timeEndPeriod");
-        if (g_timeBeginPeriod)
+        g_winmmModule = LoadLibraryExW(L"winmm.dll", 0, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (g_winmmModule)
         {
-            g_timeBeginPeriod(1);
+            g_timeBeginPeriod = (TimeBeginPeriodProc)GetProcAddress(g_winmmModule, "timeBeginPeriod");
+            g_timeEndPeriod = (TimeEndPeriodProc)GetProcAddress(g_winmmModule, "timeEndPeriod");
         }
+    }
+    if (g_timeBeginPeriod)
+    {
+        g_timeBeginPeriod(1);
     }
 
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
-    scope->avrt = LoadLibraryW(L"avrt.dll");
-    if (scope->avrt)
+    if (!g_avrtModule)
     {
-        setMmcss = (AvSetMmThreadCharacteristicsProc)GetProcAddress(scope->avrt, "AvSetMmThreadCharacteristicsW");
-        if (setMmcss)
+        g_avrtModule = LoadLibraryExW(L"avrt.dll", 0, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (g_avrtModule)
         {
-            scope->mmcss = setMmcss(L"Capture", &taskIndex);
+            g_avSetMmThreadCharacteristics = (AvSetMmThreadCharacteristicsProc)GetProcAddress(g_avrtModule, "AvSetMmThreadCharacteristicsW");
+            g_avRevertMmThreadCharacteristics = (AvRevertMmThreadCharacteristicsProc)GetProcAddress(g_avrtModule, "AvRevertMmThreadCharacteristics");
         }
+    }
+    if (g_avSetMmThreadCharacteristics)
+    {
+        scope->mmcss = g_avSetMmThreadCharacteristics(L"Capture", &taskIndex);
     }
 }
 
 static void EndBurstPerfScope(BurstPerfScope *scope)
 {
-    AvRevertMmThreadCharacteristicsProc revertMmcss;
-    HMODULE winmm;
-
-    if (scope->avrt)
+    if (g_avRevertMmThreadCharacteristics && scope->mmcss)
     {
-        revertMmcss = (AvRevertMmThreadCharacteristicsProc)GetProcAddress(scope->avrt, "AvRevertMmThreadCharacteristics");
-        if (revertMmcss && scope->mmcss)
-        {
-            revertMmcss(scope->mmcss);
-        }
-        FreeLibrary(scope->avrt);
+        g_avRevertMmThreadCharacteristics(scope->mmcss);
     }
 
     if (scope->oldThreadPriority != THREAD_PRIORITY_ERROR_RETURN)
@@ -1548,13 +1618,6 @@ static void EndBurstPerfScope(BurstPerfScope *scope)
     {
         g_timeEndPeriod(1);
     }
-    winmm = GetModuleHandleW(L"winmm.dll");
-    if (winmm)
-    {
-        FreeLibrary(winmm);
-    }
-    g_timeBeginPeriod = 0;
-    g_timeEndPeriod = 0;
 }
 
 static void SleepUntilTick(LONGLONG targetTick, LONGLONG frequency)
@@ -1586,7 +1649,7 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
     BOOL buffering;
     WCHAR path[MAX_PATH];
     BitmapImage frame;
-    BurstFrame *frames = 0;
+    BurstFrameStore store;
     BurstPerfScope perfScope;
     LARGE_INTEGER frequency;
     LARGE_INTEGER counter;
@@ -1596,7 +1659,11 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
     HDC memory;
     HGDIOBJ oldBitmap;
     RECT bounds = target->bounds;
+    DWORD frameBytes;
+    int *freeformNodes = 0;
 
+    ZeroMemory(&frame, sizeof(frame));
+    ZeroMemory(&store, sizeof(store));
     if (frameCount < 1) frameCount = 1;
     QueryPerformanceFrequency(&frequency);
     intervalTicks = ((LONGLONG)intervalMilliseconds * frequency.QuadPart) / 1000;
@@ -1607,33 +1674,44 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
     if (target->mode == MODE_FREEFORM)
     {
         RECT freeformBounds = target->bounds;
-        DWORD frameBytes;
         if (target->points && target->pointCount >= 3)
         {
             BoundsFromPoints(target->points, target->pointCount, &freeformBounds);
         }
-        frameBytes = (DWORD)(RectWidth(freeformBounds) * RectHeight(freeformBounds) * 4);
+        if (!CreateBitmapImage(&frame, RectWidth(freeformBounds), RectHeight(freeformBounds)))
+        {
+            EndBurstPerfScope(&perfScope);
+            return 0;
+        }
+        frameBytes = (DWORD)(frame.stride * frame.height);
         buffering = ShouldBufferBurst(frameCount, frameBytes);
         if (buffering)
         {
-            frames = (BurstFrame *)AllocZero(sizeof(BurstFrame) * frameCount);
-            buffering = frames != 0;
+            buffering = CreateBurstFrameStore(&store, frameCount, frameBytes);
         }
+        if (target->points && target->pointCount >= 3)
+        {
+            freeformNodes = (int *)AllocMem(sizeof(int) * target->pointCount);
+        }
+
+        screen = GetDC(0);
+        memory = CreateCompatibleDC(screen);
+        oldBitmap = SelectObject(memory, frame.bitmap);
 
         for (i = 0; i < frameCount; ++i)
         {
-            ZeroMemory(&frame, sizeof(frame));
-            if (CaptureTargetToImage(target, &frame))
+            BitBlt(memory, 0, 0, frame.width, frame.height, screen, freeformBounds.left, freeformBounds.top, GetCaptureRop());
+            if (target->points && target->pointCount >= 3)
             {
-                if (buffering && StoreBurstFrame(frames, i, &frame))
-                {
-                }
-                else
-                {
-                    MakeFramePath(folder, i, path);
-                    if (SaveBmpImage(path, &frame)) ++immediateSaved;
-                }
-                FreeBitmapImage(&frame);
+                ApplyFreeformMaskWithNodes(&frame, freeformBounds, target->points, target->pointCount, freeformNodes);
+            }
+            if (buffering && StoreBurstFrame(&store, i, &frame))
+            {
+            }
+            else
+            {
+                MakeFramePath(folder, i, path);
+                if (SaveBmpImage(path, &frame)) ++immediateSaved;
             }
             nextTick += intervalTicks;
             if (i + 1 < frameCount)
@@ -1641,11 +1719,16 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
                 SleepUntilTick(nextTick, frequency.QuadPart);
             }
         }
-        if (frames)
+        SelectObject(memory, oldBitmap);
+        DeleteDC(memory);
+        ReleaseDC(0, screen);
+        FreeMem(freeformNodes);
+        if (store.frames)
         {
-            saved += FlushBurstFrames(frames, frameCount, RectWidth(freeformBounds), RectHeight(freeformBounds), RectWidth(freeformBounds) * 4, folder);
-            FreeBurstFrames(frames, frameCount);
+            saved += FlushBurstFrameStore(&store, frame.width, frame.height, frame.stride, folder);
+            FreeBurstFrameStore(&store);
         }
+        FreeBitmapImage(&frame);
         EndBurstPerfScope(&perfScope);
         return saved + immediateSaved;
     }
@@ -1659,11 +1742,11 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
         EndBurstPerfScope(&perfScope);
         return 0;
     }
-    buffering = ShouldBufferBurst(frameCount, (DWORD)(frame.stride * frame.height));
+    frameBytes = (DWORD)(frame.stride * frame.height);
+    buffering = ShouldBufferBurst(frameCount, frameBytes);
     if (buffering)
     {
-        frames = (BurstFrame *)AllocZero(sizeof(BurstFrame) * frameCount);
-        buffering = frames != 0;
+        buffering = CreateBurstFrameStore(&store, frameCount, frameBytes);
     }
     screen = GetDC(0);
     memory = CreateCompatibleDC(screen);
@@ -1675,7 +1758,7 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
             GetWindowRect(target->window, &bounds);
         }
         BitBlt(memory, 0, 0, frame.width, frame.height, screen, bounds.left, bounds.top, GetCaptureRop());
-        if (buffering && StoreBurstFrame(frames, i, &frame))
+        if (buffering && StoreBurstFrame(&store, i, &frame))
         {
         }
         else
@@ -1692,10 +1775,10 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
     SelectObject(memory, oldBitmap);
     DeleteDC(memory);
     ReleaseDC(0, screen);
-    if (frames)
+    if (store.frames)
     {
-        saved += FlushBurstFrames(frames, frameCount, frame.width, frame.height, frame.stride, folder);
-        FreeBurstFrames(frames, frameCount);
+        saved += FlushBurstFrameStore(&store, frame.width, frame.height, frame.stride, folder);
+        FreeBurstFrameStore(&store);
     }
     FreeBitmapImage(&frame);
     EndBurstPerfScope(&perfScope);
@@ -2230,6 +2313,23 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     case WM_DESTROY:
         FreeBitmapImage(&g_image);
         FreeStrokes();
+        FreeMem(g_scratchPoints);
+        g_scratchPoints = 0;
+        g_scratchPointCapacity = 0;
+        if (g_avrtModule)
+        {
+            FreeLibrary(g_avrtModule);
+            g_avrtModule = 0;
+            g_avSetMmThreadCharacteristics = 0;
+            g_avRevertMmThreadCharacteristics = 0;
+        }
+        if (g_winmmModule)
+        {
+            FreeLibrary(g_winmmModule);
+            g_winmmModule = 0;
+            g_timeBeginPeriod = 0;
+            g_timeEndPeriod = 0;
+        }
         PostQuitMessage(0);
         return 0;
     }
