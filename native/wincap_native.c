@@ -12,6 +12,10 @@
 #define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
 #endif
 
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
 #pragma function(memset)
 #pragma function(memcpy)
 
@@ -41,6 +45,7 @@ void *__cdecl memcpy(void *destination, const void *source, size_t size)
 #define PICKER_CLASS L"WinCapNativePicker"
 #define BURST_DIALOG_CLASS L"WinCapNativeBurstDialog"
 #define VIEWER_CLASS L"WinCapNativeBurstViewer"
+#define BURST_MARKER_CLASS L"WinCapNativeBurstMarker"
 
 #define IDC_NEW 1001
 #define IDC_MODE 1002
@@ -169,6 +174,15 @@ typedef struct OverlayState
     RECT selected;
     PointVec points;
 } OverlayState;
+
+typedef struct BurstMarkerState
+{
+    CaptureMode mode;
+    RECT virtualBounds;
+    RECT bounds;
+    POINT *points;
+    int pointCount;
+} BurstMarkerState;
 
 typedef struct BurstViewerState
 {
@@ -1287,7 +1301,7 @@ static BOOL ShowBurstDialog(HWND owner, int *durationSeconds, int *intervalMilli
     ZeroMemory(&state, sizeof(state));
     EnableWindow(owner, FALSE);
     CreateWindowExW(WS_EX_DLGMODALFRAME, BURST_DIALOG_CLASS, L"Burst Capture", WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, 320, 180, owner, 0, g_instance, &state);
+        CW_USEDEFAULT, CW_USEDEFAULT, 320, 210, owner, 0, g_instance, &state);
     while (!state.done && GetMessageW(&msg, 0, 0, 0))
     {
         if (!IsDialogMessageW(state.hwnd, &msg))
@@ -1451,6 +1465,128 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
         return 0;
     }
     return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+static LRESULT CALLBACK BurstMarkerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    BurstMarkerState *state = (BurstMarkerState *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    PAINTSTRUCT ps;
+    HDC dc;
+    RECT client;
+    RECT marker;
+    HPEN pen;
+    HGDIOBJ oldPen;
+    HGDIOBJ oldBrush;
+    HBRUSH background;
+    POINT *points;
+    int i;
+
+    switch (message)
+    {
+    case WM_CREATE:
+        state = (BurstMarkerState *)((CREATESTRUCTW *)lParam)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+        SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        return 0;
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        dc = BeginPaint(hwnd, &ps);
+        GetClientRect(hwnd, &client);
+        background = CreateSolidBrush(RGB(0, 0, 0));
+        FillRect(dc, &client, background);
+        DeleteObject(background);
+
+        pen = CreatePen(PS_SOLID, 3, RGB(255, 72, 64));
+        oldPen = SelectObject(dc, pen);
+        oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+
+        if (state &&
+            state->mode == MODE_FREEFORM &&
+            state->points &&
+            state->pointCount > 1)
+        {
+            points = GetScratchPoints(state->pointCount + 1);
+            if (points)
+            {
+                for (i = 0; i < state->pointCount; ++i)
+                {
+                    points[i].x = state->points[i].x - state->virtualBounds.left;
+                    points[i].y = state->points[i].y - state->virtualBounds.top;
+                }
+                points[state->pointCount] = points[0];
+                Polyline(dc, points, state->pointCount + 1);
+            }
+        }
+        else if (state)
+        {
+            marker = state->bounds;
+            InflateRect(&marker, 3, 3);
+            marker.left -= state->virtualBounds.left;
+            marker.right -= state->virtualBounds.left;
+            marker.top -= state->virtualBounds.top;
+            marker.bottom -= state->virtualBounds.top;
+            Rectangle(dc, marker.left, marker.top, marker.right, marker.bottom);
+        }
+
+        SelectObject(dc, oldBrush);
+        SelectObject(dc, oldPen);
+        DeleteObject(pen);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+static HWND ShowBurstMarker(const CaptureTarget *target, BurstMarkerState *state)
+{
+    HWND hwnd;
+    RECT bounds;
+    if (!target || !state)
+    {
+        return 0;
+    }
+
+    bounds = target->bounds;
+    if (target->mode == MODE_WINDOW && target->window)
+    {
+        GetWindowRect(target->window, &bounds);
+    }
+
+    ZeroMemory(state, sizeof(*state));
+    state->mode = target->mode;
+    state->bounds = bounds;
+    state->points = target->points;
+    state->pointCount = target->pointCount;
+    state->virtualBounds.left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    state->virtualBounds.top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    state->virtualBounds.right = state->virtualBounds.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    state->virtualBounds.bottom = state->virtualBounds.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+    hwnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+        BURST_MARKER_CLASS,
+        L"Burst Area",
+        WS_POPUP,
+        state->virtualBounds.left,
+        state->virtualBounds.top,
+        RectWidth(state->virtualBounds),
+        RectHeight(state->virtualBounds),
+        0,
+        0,
+        g_instance,
+        state);
+    if (hwnd)
+    {
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        UpdateWindow(hwnd);
+    }
+    return hwnd;
 }
 
 static BOOL ShowSelectionOverlay(CaptureMode mode, RECT *selected, POINT **points, int *pointCount)
@@ -2390,6 +2526,8 @@ static void RunBurstCapture(void)
     int durationSeconds;
     int intervalMilliseconds;
     CaptureTarget target;
+    BurstMarkerState markerState;
+    HWND marker;
     WCHAR folder[MAX_PATH];
     int saved;
     if (!ShowBurstDialog(g_main, &durationSeconds, &intervalMilliseconds))
@@ -2401,8 +2539,13 @@ static void RunBurstCapture(void)
         SetStatusText(L"Burst canceled.");
         return;
     }
+    marker = ShowBurstMarker(&target, &markerState);
     CreateBurstFolder(folder);
     saved = CaptureBurstFrames(&target, durationSeconds, intervalMilliseconds, folder);
+    if (marker)
+    {
+        DestroyWindow(marker);
+    }
     lstrcpyW(g_lastBurstFolder, folder);
     ShowWindow(g_main, SW_SHOW);
     SetForegroundWindow(g_main);
@@ -2978,6 +3121,14 @@ static void RegisterWindowClasses(void)
 
     wc.lpszClassName = VIEWER_CLASS;
     wc.lpfnWndProc = BurstViewerProc;
+    RegisterClassW(&wc);
+
+    ZeroMemory(&wc, sizeof(wc));
+    wc.hInstance = g_instance;
+    wc.hCursor = LoadCursorW(0, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = BURST_MARKER_CLASS;
+    wc.lpfnWndProc = BurstMarkerProc;
     RegisterClassW(&wc);
 }
 
