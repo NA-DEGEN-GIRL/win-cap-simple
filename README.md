@@ -39,7 +39,7 @@ If the .NET SDK is installed, the managed app can also be published as a .NET 10
 - 직사각형, 자유형, 창, 디스플레이 선택 캡처 / Rectangle, freeform, window, and display capture
 - 지연 캡처: 없음, 1초, 3초, 5초, 10초 / Delay capture: none, 1s, 3s, 5s, 10s
 - 연사 캡처: 임시 폴더에 프레임 저장 후 보기에서 선택 / Burst capture: saves frames to temp storage and lets you pick one later
-- Ctrl+C로 현재 캡처 복사 / Ctrl+C copies the current capture
+- Ctrl+C로 현재 캡처 복사, 넓은 붙여넣기 호환성을 위해 bitmap/DIB 포맷 제공 / Ctrl+C copies the current capture and publishes bitmap/DIB formats for broad paste compatibility
 - 기본 마커 도구 / Basic marker tool
 - Layered 캡처 토글: 투명/오버레이 창 포함이 필요할 때만 사용 / Layered capture toggle: enable only when transparent/overlay windows must be included
 - 카메라 스타일 앱 아이콘 / Camera-style app icon
@@ -64,6 +64,7 @@ The native version avoids .NET, WinForms, and the C runtime startup path. It lin
 - 연사 캡처는 캡처 버퍼와 GDI 리소스를 재사용합니다. / Burst capture reuses capture buffers and GDI resources.
 - 네이티브 연사 캡처는 burst 중 1ms 타이머 해상도, 높은 스케줄링 우선순위, 단일 RAM 프레임 블록, 픽셀 재복사 없는 BMP 저장 경로를 사용합니다. / Native burst capture uses 1ms timer resolution, elevated scheduling priority, one contiguous RAM frame block, and a BMP save path that avoids extra pixel copies.
 - 네이티브 디스플레이 연사는 가능한 경우 DXGI Output Duplication을 사용하고, 실패하면 GDI로 자동 fallback합니다. / Native display burst uses DXGI Output Duplication when available and automatically falls back to GDI.
+- 네이티브 DXGI 경로는 D3D11 device/context/output을 캐시하여 같은 디스플레이에서 두 번째 이후 burst 시작 비용을 줄입니다. / The native DXGI path caches the D3D11 device, context, and output to reduce startup cost for later bursts on the same display.
 - 기본 캡처는 `CAPTUREBLT`를 끕니다. Layered 토글을 켜면 투명/레이어드 창이 포함될 수 있지만 더 느릴 수 있습니다. / Default capture leaves `CAPTUREBLT` off. The Layered toggle may include transparent/layered windows, but can be slower.
 - 자유형 마스크는 픽셀마다 전체 폴리곤을 검사하지 않고 스캔라인 구간 방식으로 처리합니다. / Freeform masking uses scanline spans instead of testing the full polygon per pixel.
 - .NET SDK 빌드는 `PublishReadyToRun`을 사용합니다. Windows Forms는 NativeAOT/트리밍 경로와 맞지 않으므로 이 프로젝트의 초고속 경로는 네이티브 C 빌드입니다. / The .NET SDK build uses `PublishReadyToRun`. Windows Forms does not fit the NativeAOT/trimming path, so the native C build remains this project's fastest path.
@@ -76,6 +77,10 @@ The native version avoids .NET, WinForms, and the C runtime startup path. It lin
 .\build\WinCapNative.exe --self-test
 .\build\WinCapNative.exe --self-test-dxgi
 ```
+
+DXGI self-test는 같은 프로세스에서 display burst를 두 번 실행해 device cache 재사용 경로도 확인합니다.
+
+The DXGI self-test runs display burst twice in one process, which also verifies the device-cache reuse path.
 
 ## OS 캐시와 백신 영향 줄이기 / Reducing OS Cache and Antivirus Impact
 
