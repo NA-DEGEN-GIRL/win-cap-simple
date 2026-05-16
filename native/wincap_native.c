@@ -182,6 +182,11 @@ typedef struct BurstMarkerState
     RECT bounds;
     POINT *points;
     int pointCount;
+    int frameCount;
+    int completedFrames;
+    int intervalMilliseconds;
+    DWORD lastProgressPaintTick;
+    WCHAR progressText[64];
 } BurstMarkerState;
 
 typedef struct BurstViewerState
@@ -245,6 +250,8 @@ static BOOL g_lastBurstUsedDxgi;
 static COLORREF g_markerColor = RGB(232, 43, 43);
 static int g_markerWidth = 6;
 static int g_toolbarBottom = 48;
+static HWND g_burstMarkerWindow;
+static BurstMarkerState *g_burstMarkerState;
 static MonitorItem g_monitors[MAX_MONITORS];
 static int g_monitorCount;
 static BOOL g_monitorsLoaded;
@@ -1479,10 +1486,12 @@ static LRESULT CALLBACK BurstMarkerProc(HWND hwnd, UINT message, WPARAM wParam, 
     HDC dc;
     RECT client;
     RECT marker;
+    RECT label;
     HPEN pen;
     HGDIOBJ oldPen;
     HGDIOBJ oldBrush;
     HBRUSH background;
+    HBRUSH labelBrush;
     POINT *points;
     int i;
 
@@ -1493,6 +1502,13 @@ static LRESULT CALLBACK BurstMarkerProc(HWND hwnd, UINT message, WPARAM wParam, 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
         SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        return 0;
+    case WM_DESTROY:
+        if (g_burstMarkerWindow == hwnd)
+        {
+            g_burstMarkerWindow = 0;
+            g_burstMarkerState = 0;
+        }
         return 0;
     case WM_NCHITTEST:
         return HTTRANSPARENT;
@@ -1542,10 +1558,103 @@ static LRESULT CALLBACK BurstMarkerProc(HWND hwnd, UINT message, WPARAM wParam, 
         SelectObject(dc, oldBrush);
         SelectObject(dc, oldPen);
         DeleteObject(pen);
+
+        if (state && state->progressText[0])
+        {
+            label.left = state->bounds.left - state->virtualBounds.left;
+            label.top = state->bounds.top - state->virtualBounds.top - 30;
+            label.right = label.left + 178;
+            label.bottom = label.top + 24;
+            if (label.top < 4)
+            {
+                label.top = state->bounds.bottom - state->virtualBounds.top + 8;
+                label.bottom = label.top + 24;
+            }
+            if (label.right > client.right - 4)
+            {
+                label.right = client.right - 4;
+                label.left = label.right - 178;
+            }
+            if (label.left < 4)
+            {
+                label.left = 4;
+                label.right = 182;
+            }
+
+            labelBrush = CreateSolidBrush(RGB(32, 32, 32));
+            FillRect(dc, &label, labelBrush);
+            DeleteObject(labelBrush);
+            InflateRect(&label, -7, 0);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(255, 255, 255));
+            DrawTextW(dc, state->progressText, -1, &label, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+
         EndPaint(hwnd, &ps);
         return 0;
     }
     return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+static void FormatBurstMarkerProgress(BurstMarkerState *state)
+{
+    int remainingFrames;
+    int remainingTenths;
+    int seconds;
+    int tenths;
+    if (!state || state->frameCount <= 0)
+    {
+        return;
+    }
+    if (state->completedFrames < 0)
+    {
+        state->completedFrames = 0;
+    }
+    if (state->completedFrames > state->frameCount)
+    {
+        state->completedFrames = state->frameCount;
+    }
+    remainingFrames = state->frameCount - state->completedFrames;
+    remainingTenths = ((remainingFrames * state->intervalMilliseconds) + 50) / 100;
+    seconds = remainingTenths / 10;
+    tenths = remainingTenths % 10;
+    wsprintfW(state->progressText, L"Burst %d/%d  %d.%ds left", state->completedFrames, state->frameCount, seconds, tenths);
+}
+
+static void BeginBurstMarkerProgress(int frameCount, int intervalMilliseconds)
+{
+    if (!g_burstMarkerWindow || !g_burstMarkerState)
+    {
+        return;
+    }
+    g_burstMarkerState->frameCount = frameCount;
+    g_burstMarkerState->completedFrames = 0;
+    g_burstMarkerState->intervalMilliseconds = intervalMilliseconds;
+    g_burstMarkerState->lastProgressPaintTick = 0;
+    FormatBurstMarkerProgress(g_burstMarkerState);
+    InvalidateRect(g_burstMarkerWindow, 0, TRUE);
+    UpdateWindow(g_burstMarkerWindow);
+}
+
+static void UpdateBurstMarkerProgress(int completedFrames, BOOL force)
+{
+    DWORD now;
+    if (!g_burstMarkerWindow || !g_burstMarkerState || g_burstMarkerState->frameCount <= 0)
+    {
+        return;
+    }
+    now = GetTickCount();
+    if (!force &&
+        g_burstMarkerState->lastProgressPaintTick &&
+        now - g_burstMarkerState->lastProgressPaintTick < 250)
+    {
+        return;
+    }
+    g_burstMarkerState->completedFrames = completedFrames;
+    g_burstMarkerState->lastProgressPaintTick = now;
+    FormatBurstMarkerProgress(g_burstMarkerState);
+    InvalidateRect(g_burstMarkerWindow, 0, TRUE);
+    UpdateWindow(g_burstMarkerWindow);
 }
 
 static HWND ShowBurstMarker(const CaptureTarget *target, BurstMarkerState *state)
@@ -1568,6 +1677,7 @@ static HWND ShowBurstMarker(const CaptureTarget *target, BurstMarkerState *state
     state->bounds = bounds;
     state->points = target->points;
     state->pointCount = target->pointCount;
+    lstrcpyW(state->progressText, L"Burst starting...");
     state->virtualBounds.left = GetSystemMetrics(SM_XVIRTUALSCREEN);
     state->virtualBounds.top = GetSystemMetrics(SM_YVIRTUALSCREEN);
     state->virtualBounds.right = state->virtualBounds.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -1588,6 +1698,8 @@ static HWND ShowBurstMarker(const CaptureTarget *target, BurstMarkerState *state
         state);
     if (hwnd)
     {
+        g_burstMarkerWindow = hwnd;
+        g_burstMarkerState = state;
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         UpdateWindow(hwnd);
     }
@@ -2162,6 +2274,7 @@ static BOOL TryCaptureBurstFramesDxgiDisplay(
             ++saved;
         }
     }
+    UpdateBurstMarkerProgress(1, frameCount == 1);
     FreeBitmapImage(&seed);
 
     nextTick += intervalTicks;
@@ -2223,6 +2336,7 @@ static BOOL TryCaptureBurstFramesDxgiDisplay(
                 ++saved;
             }
         }
+        UpdateBurstMarkerProgress(i + 1, i + 1 == frameCount);
 
         if (texture)
         {
@@ -2402,6 +2516,7 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
     QueryPerformanceCounter(&counter);
     nextTick = counter.QuadPart;
     BeginBurstPerfScope(&perfScope);
+    BeginBurstMarkerProgress(frameCount, intervalMilliseconds);
     g_lastBurstUsedDxgi = FALSE;
 
     if (target->mode == MODE_DISPLAY &&
@@ -2454,6 +2569,7 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
                 MakeFramePath(folder, i, path);
                 if (SaveBmpImage(path, &frame)) ++immediateSaved;
             }
+            UpdateBurstMarkerProgress(i + 1, i + 1 == frameCount);
             nextTick += intervalTicks;
             if (i + 1 < frameCount)
             {
@@ -2507,6 +2623,7 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
             MakeFramePath(folder, i, path);
             if (SaveBmpImage(path, &frame)) ++immediateSaved;
         }
+        UpdateBurstMarkerProgress(i + 1, i + 1 == frameCount);
         nextTick += intervalTicks;
         if (i + 1 < frameCount)
         {
