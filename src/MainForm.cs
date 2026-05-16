@@ -19,6 +19,7 @@ namespace WinCapSimple
         private readonly ToolStripStatusLabel _status = new ToolStripStatusLabel();
 
         private Bitmap _clipboardImage;
+        private Icon _windowIcon;
         private string _lastBurstFolder;
         private bool _displaysLoaded;
 
@@ -37,6 +38,7 @@ namespace WinCapSimple
             ResumeLayout(false);
 
             SetStatus("Ready.");
+            BeginInvoke(new MethodInvoker(ApplyWindowIcon));
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -64,7 +66,28 @@ namespace WinCapSimple
                 _clipboardImage = null;
             }
 
+            if (_windowIcon != null)
+            {
+                _windowIcon.Dispose();
+                _windowIcon = null;
+            }
+
             base.OnFormClosed(e);
+        }
+
+        private void ApplyWindowIcon()
+        {
+            try
+            {
+                _windowIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                if (_windowIcon != null)
+                {
+                    Icon = _windowIcon;
+                }
+            }
+            catch
+            {
+            }
         }
 
         private ToolStrip CreateToolStrip()

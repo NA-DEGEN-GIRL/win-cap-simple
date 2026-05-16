@@ -7,6 +7,8 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $src = Join-Path $root "src"
 $build = Join-Path $root "build"
+$icon = Join-Path $root "assets\wincap.ico"
+$iconTool = Join-Path $root "tools\make-icon.ps1"
 $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 
 if (-not (Test-Path -LiteralPath $csc)) {
@@ -19,10 +21,14 @@ if (-not (Test-Path -LiteralPath $csc)) {
 
 New-Item -ItemType Directory -Force -Path $build | Out-Null
 
+if (-not (Test-Path -LiteralPath $icon)) {
+    & $iconTool -OutPath $icon
+}
+
 $sources = Get-ChildItem -LiteralPath $src -Filter *.cs | Sort-Object FullName | ForEach-Object { $_.FullName }
 $output = Join-Path $build "WinCapSimple.exe"
 
-& $csc /nologo /target:winexe /optimize+ /debug- /filealign:512 /platform:x64 /out:$output `
+& $csc /nologo /target:winexe /optimize+ /debug- /filealign:512 /platform:x64 /out:$output /win32icon:$icon `
     /reference:System.dll `
     /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll `
