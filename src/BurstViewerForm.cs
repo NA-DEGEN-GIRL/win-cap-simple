@@ -15,6 +15,7 @@ namespace WinCapSimple
         private readonly Button _copyButton = new Button();
         private readonly Button _saveButton = new Button();
         private readonly Button _closeButton = new Button();
+        private Bitmap _clipboardImage;
 
         public Bitmap SelectedImage;
 
@@ -89,6 +90,12 @@ namespace WinCapSimple
                     _preview.Image.Dispose();
                     _preview.Image = null;
                 }
+
+                if (_clipboardImage != null)
+                {
+                    _clipboardImage.Dispose();
+                    _clipboardImage = null;
+                }
             }
 
             base.Dispose(disposing);
@@ -143,14 +150,29 @@ namespace WinCapSimple
         private void CopySelected()
         {
             string file = GetSelectedFile();
+            Bitmap nextClipboardImage;
             if (file == null)
             {
                 return;
             }
 
-            using (Bitmap bitmap = LoadBitmapUnlocked(file))
+            nextClipboardImage = LoadBitmapUnlocked(file);
+            try
             {
-                Clipboard.SetImage(bitmap);
+                ClipboardUtil.SetImage(nextClipboardImage);
+                if (_clipboardImage != null)
+                {
+                    _clipboardImage.Dispose();
+                }
+                _clipboardImage = nextClipboardImage;
+                nextClipboardImage = null;
+            }
+            finally
+            {
+                if (nextClipboardImage != null)
+                {
+                    nextClipboardImage.Dispose();
+                }
             }
         }
 

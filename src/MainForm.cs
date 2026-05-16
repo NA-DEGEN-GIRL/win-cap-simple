@@ -468,6 +468,7 @@ namespace WinCapSimple
 
         private void CopyCurrent(bool userVisible)
         {
+            Bitmap nextClipboardImage = null;
             if (!_canvas.HasImage)
             {
                 if (userVisible)
@@ -479,13 +480,16 @@ namespace WinCapSimple
 
             try
             {
+                nextClipboardImage = _canvas.CreateFlattenedImage();
+                ClipboardUtil.SetImage(nextClipboardImage);
+
                 if (_clipboardImage != null)
                 {
                     _clipboardImage.Dispose();
                 }
 
-                _clipboardImage = _canvas.CreateFlattenedImage();
-                Clipboard.SetImage(_clipboardImage);
+                _clipboardImage = nextClipboardImage;
+                nextClipboardImage = null;
                 if (userVisible)
                 {
                     SetStatus("Copied to clipboard.");
@@ -498,6 +502,13 @@ namespace WinCapSimple
                     MessageBox.Show(this, ex.Message, "Copy failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
                 SetStatus("Copy failed.");
+            }
+            finally
+            {
+                if (nextClipboardImage != null)
+                {
+                    nextClipboardImage.Dispose();
+                }
             }
         }
 

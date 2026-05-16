@@ -544,6 +544,123 @@ static BOOL SaveBmpImage(const WCHAR *path, const BitmapImage *image)
     return SaveBmpBits(path, image->width, image->height, image->stride, image->bits);
 }
 
+static HGLOBAL CreateClipboardDib(const BitmapImage *image)
+{
+    HGLOBAL memory;
+    BYTE *base;
+    BYTE *pixels;
+    BITMAPINFOHEADER *header;
+    DWORD rowBytes;
+    DWORD pixelBytes;
+    SIZE_T totalBytes;
+    int y;
+
+    if (!image || !image->bits || image->width <= 0 || image->height <= 0 || image->stride <= 0)
+    {
+        return 0;
+    }
+
+    rowBytes = (DWORD)image->width * 4;
+    if (image->stride < (int)rowBytes)
+    {
+        return 0;
+    }
+
+    pixelBytes = rowBytes * (DWORD)image->height;
+    totalBytes = sizeof(BITMAPINFOHEADER) + pixelBytes;
+    memory = GlobalAlloc(GMEM_MOVEABLE, totalBytes);
+    if (!memory)
+    {
+        return 0;
+    }
+
+    base = (BYTE *)GlobalLock(memory);
+    if (!base)
+    {
+        GlobalFree(memory);
+        return 0;
+    }
+
+    ZeroMemory(base, totalBytes);
+    header = (BITMAPINFOHEADER *)base;
+    header->biSize = sizeof(BITMAPINFOHEADER);
+    header->biWidth = image->width;
+    header->biHeight = image->height;
+    header->biPlanes = 1;
+    header->biBitCount = 32;
+    header->biCompression = BI_RGB;
+    header->biSizeImage = pixelBytes;
+
+    pixels = base + sizeof(BITMAPINFOHEADER);
+    for (y = 0; y < image->height; ++y)
+    {
+        const BYTE *src = (const BYTE *)image->bits + (image->height - 1 - y) * image->stride;
+        BYTE *dst = pixels + y * rowBytes;
+        CopyMemory(dst, src, rowBytes);
+    }
+
+    GlobalUnlock(memory);
+    return memory;
+}
+
+static int CopyBitmapImageToClipboard(HWND owner, BitmapImage *image)
+{
+    HGLOBAL dib;
+    HANDLE bitmapResult;
+    HANDLE dibResult;
+    int ok;
+
+    if (!image || !image->bitmap || !image->bits)
+    {
+        return 0;
+    }
+
+    dib = CreateClipboardDib(image);
+    if (!OpenClipboard(owner))
+    {
+        if (dib)
+        {
+            GlobalFree(dib);
+        }
+        return 2;
+    }
+
+    if (!EmptyClipboard())
+    {
+        CloseClipboard();
+        if (dib)
+        {
+            GlobalFree(dib);
+        }
+        return 0;
+    }
+
+    bitmapResult = SetClipboardData(CF_BITMAP, image->bitmap);
+    if (bitmapResult)
+    {
+        image->bitmap = 0;
+    }
+
+    dibResult = 0;
+    if (dib)
+    {
+        dibResult = SetClipboardData(CF_DIB, dib);
+        if (dibResult)
+        {
+            dib = 0;
+        }
+    }
+
+    CloseClipboard();
+    if (dib)
+    {
+        GlobalFree(dib);
+    }
+
+    ok = bitmapResult || dibResult;
+    return ok ? 1 : 0;
+}
+
 static BOOL CaptureRectToImage(RECT bounds, BitmapImage *image)
 {
     HDC screen;
@@ -826,22 +943,24 @@ static BOOL CreateFlattenedImage(BitmapImage *flat)
 static void CopyCurrentImage(void)
 {
     BitmapImage flat;
+    int copyResult;
     if (!CreateFlattenedImage(&flat))
     {
         SetStatusText(L"Nothing to copy.");
         return;
     }
-    if (OpenClipboard(g_main))
+    copyResult = CopyBitmapImageToClipboard(g_main, &flat);
+    if (copyResult == 1)
     {
-        EmptyClipboard();
-        SetClipboardData(CF_BITMAP, flat.bitmap);
-        flat.bitmap = 0;
-        CloseClipboard();
         SetStatusText(L"Copied to clipboard.");
+    }
+    else if (copyResult == 2)
+    {
+        SetStatusText(L"Clipboard is busy.");
     }
     else
     {
-        SetStatusText(L"Clipboard is busy.");
+        SetStatusText(L"Copy failed.");
     }
     FreeBitmapImage(&flat);
 }
@@ -2311,14 +2430,21 @@ static void ViewerCopySelected(BurstViewerState *state)
 {
     LRESULT index = SendMessageW(state->list, LB_GETCURSEL, 0, 0);
     BitmapImage image;
+    int copyResult;
     if (index >= 0 && index < state->count && LoadBmpImage(state->files[index], &image))
     {
-        if (OpenClipboard(state->hwnd))
+        copyResult = CopyBitmapImageToClipboard(state->hwnd, &image);
+        if (copyResult == 1)
         {
-            EmptyClipboard();
-            SetClipboardData(CF_BITMAP, image.bitmap);
-            image.bitmap = 0;
-            CloseClipboard();
+            SetWindowTextW(state->hwnd, L"Burst Viewer - copied");
+        }
+        else if (copyResult == 2)
+        {
+            SetWindowTextW(state->hwnd, L"Burst Viewer - clipboard busy");
+        }
+        else
+        {
+            SetWindowTextW(state->hwnd, L"Burst Viewer - copy failed");
         }
         FreeBitmapImage(&image);
     }
