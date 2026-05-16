@@ -27,6 +27,22 @@ build\WinCapSimple.exe
 
 The build script uses the Windows .NET Framework C# compiler, so it does not require the .NET SDK.
 
+## Native Fast Start Build
+
+For the fastest cold start, build the native Win32 version:
+
+```powershell
+.\build-native.ps1
+```
+
+The output is:
+
+```text
+build\WinCapNative.exe
+```
+
+This version avoids .NET, WinForms, and the C runtime startup path. It uses plain Win32 controls, GDI `BitBlt` capture, BMP burst frames, and a custom entry point linked with `/NODEFAULTLIB`.
+
 For the fastest cold start on .NET Framework, install a native image after building:
 
 ```powershell
