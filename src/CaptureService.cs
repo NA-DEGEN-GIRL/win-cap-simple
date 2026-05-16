@@ -5,7 +5,6 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
-using System.Runtime;
 using System.Threading;
 
 namespace WinCapSimple
@@ -371,13 +370,11 @@ namespace WinCapSimple
         private sealed class FastCaptureScope : IDisposable
         {
             private readonly ThreadPriority _oldPriority;
-            private readonly GCLatencyMode _oldLatencyMode;
 
             public FastCaptureScope()
             {
                 Thread thread = Thread.CurrentThread;
                 _oldPriority = thread.Priority;
-                _oldLatencyMode = GCSettings.LatencyMode;
 
                 try
                 {
@@ -386,26 +383,10 @@ namespace WinCapSimple
                 catch
                 {
                 }
-
-                try
-                {
-                    GCSettings.LatencyMode = GCLatencyMode.LowLatency;
-                }
-                catch
-                {
-                }
             }
 
             public void Dispose()
             {
-                try
-                {
-                    GCSettings.LatencyMode = _oldLatencyMode;
-                }
-                catch
-                {
-                }
-
                 try
                 {
                     Thread.CurrentThread.Priority = _oldPriority;

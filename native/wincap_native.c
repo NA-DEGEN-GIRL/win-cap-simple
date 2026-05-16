@@ -1,9 +1,12 @@
 #define WIN32_LEAN_AND_MEAN
 #define UNICODE
 #define _UNICODE
+#define COBJMACROS
 #include <windows.h>
 #include <windowsx.h>
 #include <commdlg.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
 
 #ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
 #define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
@@ -199,7 +202,6 @@ typedef struct BurstPerfScope
 {
     DWORD oldPriorityClass;
     int oldThreadPriority;
-    HMODULE avrt;
     HANDLE mmcss;
 } BurstPerfScope;
 
@@ -217,6 +219,7 @@ static Stroke *g_strokes;
 static Stroke *g_activeStroke;
 static BOOL g_markerEnabled;
 static BOOL g_includeLayeredWindows;
+static BOOL g_lastBurstUsedDxgi;
 static COLORREF g_markerColor = RGB(232, 43, 43);
 static int g_markerWidth = 6;
 static MonitorItem g_monitors[MAX_MONITORS];
@@ -626,7 +629,7 @@ static void ApplyFreeformMaskWithNodes(BitmapImage *image, RECT bounds, const PO
             int j = i == 0 ? count - 1 : i - 1;
             int yi = points[i].y;
             int yj = points[j].y;
-            if ((yi < screenY && yj >= screenY) || (yj < screenY && yi >= screenY))
+            if (yi != yj && ((yi < screenY && yj >= screenY) || (yj < screenY && yi >= screenY)))
             {
                 nodes[nodeCount++] = points[i].x + (screenY - yi) * (points[j].x - points[i].x) / (yj - yi);
             }
@@ -1518,6 +1521,17 @@ static BOOL StoreBurstFrame(BurstFrameStore *store, int index, const BitmapImage
     return TRUE;
 }
 
+static BOOL StoreRawBurstFrame(BurstFrameStore *store, int index, const BYTE *bits, DWORD bytes)
+{
+    if (!store || !store->frames || !bits || index < 0 || index >= store->count || bytes != store->frameBytes)
+    {
+        return FALSE;
+    }
+    CopyMemory(store->frames[index].bits, bits, bytes);
+    store->frames[index].valid = TRUE;
+    return TRUE;
+}
+
 static void FreeBurstFrameStore(BurstFrameStore *store)
 {
     if (!store)
@@ -1557,6 +1571,390 @@ static BOOL ShouldBufferBurst(int frameCount, DWORD frameBytes)
 {
     ULONGLONG totalBytes = (ULONGLONG)frameCount * (ULONGLONG)frameBytes;
     return totalBytes <= (256ULL * 1024ULL * 1024ULL);
+}
+
+static void SleepUntilTick(LONGLONG targetTick, LONGLONG frequency);
+
+static BOOL RectsEqual(RECT left, RECT right)
+{
+    return left.left == right.left &&
+        left.top == right.top &&
+        left.right == right.right &&
+        left.bottom == right.bottom;
+}
+
+static BOOL CreateDxgiDuplicationForBounds(
+    RECT bounds,
+    ID3D11Device **deviceOut,
+    ID3D11DeviceContext **contextOut,
+    IDXGIOutputDuplication **duplicationOut)
+{
+    HRESULT hr;
+    IDXGIFactory1 *factory = 0;
+    IDXGIAdapter1 *adapter = 0;
+    IDXGIOutput *output = 0;
+    IDXGIOutput1 *output1 = 0;
+    ID3D11Device *device = 0;
+    ID3D11DeviceContext *context = 0;
+    IDXGIOutputDuplication *duplication = 0;
+    DXGI_OUTPUT_DESC outputDesc;
+    D3D_FEATURE_LEVEL levels[3];
+    D3D_FEATURE_LEVEL actualLevel;
+    UINT adapterIndex;
+    UINT outputIndex;
+    BOOL found = FALSE;
+
+    *deviceOut = 0;
+    *contextOut = 0;
+    *duplicationOut = 0;
+
+    hr = CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory);
+    if (FAILED(hr))
+    {
+        return FALSE;
+    }
+
+    levels[0] = D3D_FEATURE_LEVEL_11_0;
+    levels[1] = D3D_FEATURE_LEVEL_10_1;
+    levels[2] = D3D_FEATURE_LEVEL_10_0;
+
+    for (adapterIndex = 0; !found && IDXGIFactory1_EnumAdapters1(factory, adapterIndex, &adapter) != DXGI_ERROR_NOT_FOUND; ++adapterIndex)
+    {
+        for (outputIndex = 0; !found && IDXGIAdapter1_EnumOutputs(adapter, outputIndex, &output) != DXGI_ERROR_NOT_FOUND; ++outputIndex)
+        {
+            ZeroMemory(&outputDesc, sizeof(outputDesc));
+            if (SUCCEEDED(IDXGIOutput_GetDesc(output, &outputDesc)) &&
+                RectsEqual(outputDesc.DesktopCoordinates, bounds) &&
+                outputDesc.Rotation == DXGI_MODE_ROTATION_IDENTITY)
+            {
+                hr = D3D11CreateDevice(
+                    (IDXGIAdapter *)adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    0,
+                    0,
+                    levels,
+                    3,
+                    D3D11_SDK_VERSION,
+                    &device,
+                    &actualLevel,
+                    &context);
+                if (SUCCEEDED(hr) &&
+                    SUCCEEDED(IDXGIOutput_QueryInterface(output, &IID_IDXGIOutput1, (void **)&output1)) &&
+                    SUCCEEDED(IDXGIOutput1_DuplicateOutput(output1, (IUnknown *)device, &duplication)))
+                {
+                    found = TRUE;
+                }
+            }
+
+            if (output1)
+            {
+                IDXGIOutput1_Release(output1);
+                output1 = 0;
+            }
+            if (output)
+            {
+                IDXGIOutput_Release(output);
+                output = 0;
+            }
+            if (!found)
+            {
+                if (duplication)
+                {
+                    IDXGIOutputDuplication_Release(duplication);
+                    duplication = 0;
+                }
+                if (context)
+                {
+                    ID3D11DeviceContext_Release(context);
+                    context = 0;
+                }
+                if (device)
+                {
+                    ID3D11Device_Release(device);
+                    device = 0;
+                }
+            }
+        }
+
+        if (adapter)
+        {
+            IDXGIAdapter1_Release(adapter);
+            adapter = 0;
+        }
+    }
+
+    if (factory)
+    {
+        IDXGIFactory1_Release(factory);
+    }
+
+    if (!found)
+    {
+        return FALSE;
+    }
+
+    *deviceOut = device;
+    *contextOut = context;
+    *duplicationOut = duplication;
+    return TRUE;
+}
+
+static BOOL CreateDxgiStagingTexture(
+    ID3D11Device *device,
+    ID3D11Texture2D *source,
+    ID3D11Texture2D **stagingOut,
+    int *widthOut,
+    int *heightOut,
+    int *strideOut)
+{
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D_GetDesc(source, &desc);
+    if (desc.Width == 0 || desc.Height == 0)
+    {
+        return FALSE;
+    }
+
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+
+    if (FAILED(ID3D11Device_CreateTexture2D(device, &desc, 0, stagingOut)))
+    {
+        return FALSE;
+    }
+
+    *widthOut = (int)desc.Width;
+    *heightOut = (int)desc.Height;
+    *strideOut = (int)desc.Width * 4;
+    return TRUE;
+}
+
+static void CopyDxgiMappedFrame(BYTE *destination, int width, int height, int destinationStride, const D3D11_MAPPED_SUBRESOURCE *mapped)
+{
+    int y;
+    BYTE *dst = destination;
+    BYTE *src = (BYTE *)mapped->pData;
+    DWORD rowBytes = (DWORD)(width * 4);
+
+    for (y = 0; y < height; ++y)
+    {
+        CopyMemory(dst, src, rowBytes);
+        dst += destinationStride;
+        src += mapped->RowPitch;
+    }
+}
+
+static BOOL TryCaptureBurstFramesDxgiDisplay(
+    const CaptureTarget *target,
+    int frameCount,
+    const WCHAR *folder,
+    LONGLONG intervalTicks,
+    LONGLONG firstTick,
+    LONGLONG frequency,
+    int *savedOut)
+{
+    ID3D11Device *device = 0;
+    ID3D11DeviceContext *context = 0;
+    IDXGIOutputDuplication *duplication = 0;
+    IDXGIResource *resource = 0;
+    ID3D11Texture2D *texture = 0;
+    ID3D11Texture2D *staging = 0;
+    DXGI_OUTDUPL_FRAME_INFO frameInfo;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    BurstFrameStore store;
+    BYTE *lastFrame = 0;
+    WCHAR path[MAX_PATH];
+    LONGLONG nextTick = firstTick;
+    DWORD frameBytes = 0;
+    int width = 0;
+    int height = 0;
+    int stride = 0;
+    int i;
+    int saved = 0;
+    BOOL buffering = FALSE;
+    BOOL ok = FALSE;
+    HRESULT hr;
+    BitmapImage seed;
+
+    *savedOut = 0;
+    ZeroMemory(&seed, sizeof(seed));
+    ZeroMemory(&store, sizeof(store));
+    ZeroMemory(&mapped, sizeof(mapped));
+    ZeroMemory(&frameInfo, sizeof(frameInfo));
+
+    if (target->mode != MODE_DISPLAY)
+    {
+        return FALSE;
+    }
+
+    if (!CreateDxgiDuplicationForBounds(target->bounds, &device, &context, &duplication))
+    {
+        return FALSE;
+    }
+
+    if (!CaptureRectToImage(target->bounds, &seed))
+    {
+        goto cleanup;
+    }
+    width = seed.width;
+    height = seed.height;
+    stride = seed.stride;
+    frameBytes = (DWORD)(stride * height);
+    lastFrame = (BYTE *)AllocMem(frameBytes);
+    if (!lastFrame)
+    {
+        goto cleanup;
+    }
+    CopyMemory(lastFrame, seed.bits, frameBytes);
+    buffering = ShouldBufferBurst(frameCount, frameBytes);
+    if (buffering)
+    {
+        buffering = CreateBurstFrameStore(&store, frameCount, frameBytes);
+    }
+    if (buffering)
+    {
+        StoreRawBurstFrame(&store, 0, lastFrame, frameBytes);
+    }
+    else
+    {
+        MakeFramePath(folder, 0, path);
+        if (SaveBmpBits(path, width, height, stride, lastFrame))
+        {
+            ++saved;
+        }
+    }
+    FreeBitmapImage(&seed);
+
+    nextTick += intervalTicks;
+
+    for (i = 1; i < frameCount; ++i)
+    {
+        SleepUntilTick(nextTick, frequency);
+
+        hr = IDXGIOutputDuplication_AcquireNextFrame(duplication, 0, &frameInfo, &resource);
+        if (hr == DXGI_ERROR_WAIT_TIMEOUT)
+        {
+        }
+        else if (FAILED(hr))
+        {
+            goto cleanup;
+        }
+        else
+        {
+            if (FAILED(IDXGIResource_QueryInterface(resource, &IID_ID3D11Texture2D, (void **)&texture)))
+            {
+                IDXGIOutputDuplication_ReleaseFrame(duplication);
+                goto cleanup;
+            }
+
+            if (!staging)
+            {
+                if (!CreateDxgiStagingTexture(device, texture, &staging, &width, &height, &stride))
+                {
+                    IDXGIOutputDuplication_ReleaseFrame(duplication);
+                    goto cleanup;
+                }
+                if ((DWORD)(stride * height) != frameBytes)
+                {
+                    IDXGIOutputDuplication_ReleaseFrame(duplication);
+                    goto cleanup;
+                }
+            }
+
+            ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)staging, (ID3D11Resource *)texture);
+            IDXGIOutputDuplication_ReleaseFrame(duplication);
+
+            if (FAILED(ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped)))
+            {
+                goto cleanup;
+            }
+            CopyDxgiMappedFrame(lastFrame, width, height, stride, &mapped);
+            ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
+        }
+
+        if (buffering)
+        {
+            StoreRawBurstFrame(&store, i, lastFrame, frameBytes);
+        }
+        else
+        {
+            MakeFramePath(folder, i, path);
+            if (SaveBmpBits(path, width, height, stride, lastFrame))
+            {
+                ++saved;
+            }
+        }
+
+        if (texture)
+        {
+            ID3D11Texture2D_Release(texture);
+            texture = 0;
+        }
+        if (resource)
+        {
+            IDXGIResource_Release(resource);
+            resource = 0;
+        }
+
+        nextTick += intervalTicks;
+    }
+
+    if (buffering)
+    {
+        for (i = 0; i < frameCount; ++i)
+        {
+            if (!store.frames[i].valid)
+            {
+                goto cleanup;
+            }
+        }
+
+        for (i = 0; i < frameCount; ++i)
+        {
+            MakeFramePath(folder, i, path);
+            if (SaveBmpBits(path, width, height, stride, store.frames[i].bits))
+            {
+                ++saved;
+            }
+        }
+    }
+    *savedOut = saved;
+    ok = saved > 0;
+
+cleanup:
+    FreeBitmapImage(&seed);
+    if (texture)
+    {
+        ID3D11Texture2D_Release(texture);
+    }
+    if (resource)
+    {
+        IDXGIResource_Release(resource);
+    }
+    if (staging)
+    {
+        ID3D11Texture2D_Release(staging);
+    }
+    if (duplication)
+    {
+        IDXGIOutputDuplication_Release(duplication);
+    }
+    if (context)
+    {
+        ID3D11DeviceContext_Release(context);
+    }
+    if (device)
+    {
+        ID3D11Device_Release(device);
+    }
+    FreeMem(lastFrame);
+    FreeBurstFrameStore(&store);
+    return ok;
 }
 
 static void BeginBurstPerfScope(BurstPerfScope *scope)
@@ -1670,6 +2068,15 @@ static int CaptureBurstFrames(const CaptureTarget *target, int durationSeconds, 
     QueryPerformanceCounter(&counter);
     nextTick = counter.QuadPart;
     BeginBurstPerfScope(&perfScope);
+    g_lastBurstUsedDxgi = FALSE;
+
+    if (target->mode == MODE_DISPLAY &&
+        TryCaptureBurstFramesDxgiDisplay(target, frameCount, folder, intervalTicks, nextTick, frequency.QuadPart, &saved))
+    {
+        g_lastBurstUsedDxgi = TRUE;
+        EndBurstPerfScope(&perfScope);
+        return saved;
+    }
 
     if (target->mode == MODE_FREEFORM)
     {
@@ -1807,7 +2214,7 @@ static void RunBurstCapture(void)
     ShowWindow(g_main, SW_SHOW);
     SetForegroundWindow(g_main);
     FreeTarget(&target);
-    wsprintfW(folder, L"Burst saved %d frames.", saved);
+    wsprintfW(folder, g_lastBurstUsedDxgi ? L"Burst saved %d frames (DXGI)." : L"Burst saved %d frames (GDI).", saved);
     SetStatusText(folder);
 }
 
@@ -2417,6 +2824,45 @@ static int RunSelfTest(void)
     return ok ? 0 : 1;
 }
 
+static int RunDxgiSelfTest(void)
+{
+    MONITORINFO monitorInfo;
+    POINT point;
+    HMONITOR monitor;
+    CaptureTarget target;
+    WCHAR folder[MAX_PATH];
+    WCHAR path[MAX_PATH];
+    int saved;
+
+    point.x = 0;
+    point.y = 0;
+    monitor = MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY);
+    ZeroMemory(&monitorInfo, sizeof(monitorInfo));
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!monitor || !GetMonitorInfoW(monitor, &monitorInfo))
+    {
+        return 1;
+    }
+
+    GetTempPathW(MAX_PATH, folder);
+    if (folder[lstrlenW(folder) - 1] != L'\\') lstrcatW(folder, L"\\");
+    lstrcatW(folder, L"wincap_native_dxgi_selftest");
+    CreateDirectoryW(folder, 0);
+
+    ZeroMemory(&target, sizeof(target));
+    target.mode = MODE_DISPLAY;
+    target.bounds = monitorInfo.rcMonitor;
+
+    saved = CaptureBurstFrames(&target, 1, 500, folder);
+    MakeFramePath(folder, 0, path);
+    DeleteFileW(path);
+    MakeFramePath(folder, 1, path);
+    DeleteFileW(path);
+    RemoveDirectoryW(folder);
+
+    return saved >= 1 && g_lastBurstUsedDxgi ? 0 : 2;
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previousInstance, PWSTR commandLine, int showCommand)
 {
     HWND hwnd;
@@ -2425,6 +2871,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previousInstance, PWSTR comman
     SetProcessDPIAware();
     if (ContainsTextInsensitive(GetCommandLineW(), L"--self-test"))
     {
+        if (ContainsTextInsensitive(GetCommandLineW(), L"--self-test-dxgi"))
+        {
+            return RunDxgiSelfTest();
+        }
         return RunSelfTest();
     }
     RegisterWindowClasses();

@@ -53,8 +53,17 @@ The native version avoids .NET, WinForms, and the C runtime startup path. It lin
 - 캡처 직후 자동 클립보드 합성을 하지 않고, Ctrl+C 또는 Copy 시점에만 합성합니다. / Clipboard flattening runs only on Ctrl+C or Copy, not immediately after capture.
 - 연사 캡처는 캡처 버퍼와 GDI 리소스를 재사용합니다. / Burst capture reuses capture buffers and GDI resources.
 - 네이티브 연사 캡처는 burst 중 1ms 타이머 해상도, 높은 스케줄링 우선순위, 단일 RAM 프레임 블록, 픽셀 재복사 없는 BMP 저장 경로를 사용합니다. / Native burst capture uses 1ms timer resolution, elevated scheduling priority, one contiguous RAM frame block, and a BMP save path that avoids extra pixel copies.
+- 네이티브 디스플레이 연사는 가능한 경우 DXGI Output Duplication을 사용하고, 실패하면 GDI로 자동 fallback합니다. / Native display burst uses DXGI Output Duplication when available and automatically falls back to GDI.
 - 기본 캡처는 `CAPTUREBLT`를 끕니다. Layered 토글을 켜면 투명/레이어드 창이 포함될 수 있지만 더 느릴 수 있습니다. / Default capture leaves `CAPTUREBLT` off. The Layered toggle may include transparent/layered windows, but can be slower.
 - 자유형 마스크는 픽셀마다 전체 폴리곤을 검사하지 않고 스캔라인 구간 방식으로 처리합니다. / Freeform masking uses scanline spans instead of testing the full polygon per pixel.
+
+## 검증 / Verification
+
+```powershell
+.\build\WinCapSimple.exe --self-test
+.\build\WinCapNative.exe --self-test
+.\build\WinCapNative.exe --self-test-dxgi
+```
 
 ## OS 캐시와 백신 영향 줄이기 / Reducing OS Cache and Antivirus Impact
 

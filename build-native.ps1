@@ -31,7 +31,7 @@ if (-not (Test-Path -LiteralPath $icon)) {
     & $iconTool -OutPath $icon
 }
 
-$command = "`"$vcvars`" >nul && rc /nologo /fo `"$resource`" `"$nativeResource`" && cl /nologo /O1 /Os /GS- /GF /Gw /Gy /Fo`"$object`" /Fe`"$output`" `"$native`" `"$resource`" kernel32.lib user32.lib gdi32.lib comdlg32.lib /link /NODEFAULTLIB /ENTRY:wWinMainCRTStartup /OPT:REF /OPT:ICF /FILEALIGN:512 /SUBSYSTEM:WINDOWS"
+$command = "`"$vcvars`" >nul && rc /nologo /fo `"$resource`" `"$nativeResource`" && cl /nologo /O1 /Os /GS- /GF /Gw /Gy /Fo`"$object`" /Fe`"$output`" `"$native`" `"$resource`" kernel32.lib user32.lib gdi32.lib comdlg32.lib d3d11.lib dxgi.lib dxguid.lib /link /NODEFAULTLIB /ENTRY:wWinMainCRTStartup /OPT:REF /OPT:ICF /FILEALIGN:512 /SUBSYSTEM:WINDOWS"
 cmd.exe /d /c $command
 
 if ($LASTEXITCODE -ne 0) {
