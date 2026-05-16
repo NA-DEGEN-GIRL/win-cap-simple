@@ -1,6 +1,7 @@
 build/
 bin/
 obj/
+.claude/
 *.user
 *.suo
 *.log
