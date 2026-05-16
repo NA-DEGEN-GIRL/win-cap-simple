@@ -95,6 +95,8 @@ namespace WinCapSimple
             ToolStrip toolStrip = new ToolStrip();
             toolStrip.GripStyle = ToolStripGripStyle.Hidden;
             toolStrip.Dock = DockStyle.Top;
+            toolStrip.CanOverflow = false;
+            toolStrip.LayoutStyle = ToolStripLayoutStyle.Flow;
             toolStrip.Padding = new Padding(6, 4, 6, 4);
 
             ToolStripButton newButton = new ToolStripButton("New Capture");

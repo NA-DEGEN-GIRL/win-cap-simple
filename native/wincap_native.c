@@ -244,6 +244,7 @@ static BOOL g_includeLayeredWindows;
 static BOOL g_lastBurstUsedDxgi;
 static COLORREF g_markerColor = RGB(232, 43, 43);
 static int g_markerWidth = 6;
+static int g_toolbarBottom = 48;
 static MonitorItem g_monitors[MAX_MONITORS];
 static int g_monitorCount;
 static BOOL g_monitorsLoaded;
@@ -844,9 +845,13 @@ static void GetPreviewRect(HWND hwnd, RECT *rect)
     int height;
     GetClientRect(hwnd, &client);
     rect->left = 12;
-    rect->top = 48;
+    rect->top = g_toolbarBottom;
     rect->right = client.right - 12;
     rect->bottom = client.bottom - 34;
+    if (rect->bottom <= rect->top)
+    {
+        rect->bottom = rect->top + 1;
+    }
     if (!g_image.bitmap || g_image.width <= 0 || g_image.height <= 0)
     {
         return;
@@ -2824,26 +2829,46 @@ static void OpenLatestBurstViewer(void)
     }
 }
 
+static void LayoutControlWrapped(HWND control, int *x, int *y, int width, int height, int clientRight)
+{
+    int rightLimit = clientRight - 8;
+    if (*x > 8 && *x + width > rightLimit)
+    {
+        *x = 8;
+        *y += 34;
+    }
+    MoveWindow(control, *x, *y, width, height, TRUE);
+    *x += width + 6;
+}
+
 static void LayoutMain(HWND hwnd)
 {
     RECT client;
     int y = 8;
     int x = 8;
+    int statusWidth;
     GetClientRect(hwnd, &client);
-    MoveWindow(g_controls[IDC_NEW - 1000], x, y, 92, 28, TRUE); x += 98;
-    MoveWindow(g_controls[IDC_MODE - 1000], x, y, 112, 220, TRUE); x += 118;
-    MoveWindow(g_controls[IDC_DISPLAY - 1000], x, y, 154, 220, TRUE); x += 160;
-    MoveWindow(g_controls[IDC_DELAY - 1000], x, y, 82, 220, TRUE); x += 88;
-    MoveWindow(g_controls[IDC_BURST - 1000], x, y, 64, 28, TRUE); x += 70;
-    MoveWindow(g_controls[IDC_VIEW_BURST - 1000], x, y, 82, 28, TRUE); x += 88;
-    MoveWindow(g_controls[IDC_COPY - 1000], x, y, 62, 28, TRUE); x += 68;
-    MoveWindow(g_controls[IDC_SAVE - 1000], x, y, 62, 28, TRUE); x += 68;
-    MoveWindow(g_controls[IDC_MARKER - 1000], x, y, 70, 28, TRUE); x += 76;
-    MoveWindow(g_controls[IDC_COLOR - 1000], x, y, 80, 220, TRUE); x += 86;
-    MoveWindow(g_controls[IDC_WIDTH - 1000], x, y, 66, 220, TRUE); x += 72;
-    MoveWindow(g_controls[IDC_CAPTUREBLT - 1000], x, y, 82, 28, TRUE); x += 88;
-    MoveWindow(g_controls[IDC_CLEAR - 1000], x, y, 86, 28, TRUE);
-    MoveWindow(g_controls[IDC_STATUS - 1000], 8, client.bottom - 24, client.right - 16, 20, TRUE);
+    LayoutControlWrapped(g_controls[IDC_NEW - 1000], &x, &y, 92, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_MODE - 1000], &x, &y, 112, 220, client.right);
+    LayoutControlWrapped(g_controls[IDC_DISPLAY - 1000], &x, &y, 154, 220, client.right);
+    LayoutControlWrapped(g_controls[IDC_DELAY - 1000], &x, &y, 82, 220, client.right);
+    LayoutControlWrapped(g_controls[IDC_BURST - 1000], &x, &y, 64, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_VIEW_BURST - 1000], &x, &y, 82, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_COPY - 1000], &x, &y, 62, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_SAVE - 1000], &x, &y, 62, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_MARKER - 1000], &x, &y, 70, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_COLOR - 1000], &x, &y, 80, 220, client.right);
+    LayoutControlWrapped(g_controls[IDC_WIDTH - 1000], &x, &y, 66, 220, client.right);
+    LayoutControlWrapped(g_controls[IDC_CAPTUREBLT - 1000], &x, &y, 82, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_CLEAR - 1000], &x, &y, 86, 28, client.right);
+    g_toolbarBottom = y + 40;
+    statusWidth = client.right - 16;
+    if (statusWidth < 1)
+    {
+        statusWidth = 1;
+    }
+    MoveWindow(g_controls[IDC_STATUS - 1000], 8, client.bottom - 24, statusWidth, 20, TRUE);
+    InvalidateRect(hwnd, 0, TRUE);
 }
 
 static void AddComboItem(HWND combo, const WCHAR *text)
