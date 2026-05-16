@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>WinCapSimple</RootNamespace>
+    <AssemblyName>WinCapSimple</AssemblyName>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>false</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <ApplicationIcon>..\assets\wincap.ico</ApplicationIcon>
+    <UseAppHost>true</UseAppHost>
+  </PropertyGroup>
+
+</Project>

@@ -24,6 +24,15 @@ The .NET Framework version builds without the .NET SDK by using the Windows C# c
 .\build\WinCapSimple.exe
 ```
 
+.NET SDK가 설치되어 있으면 관리형 앱을 .NET 10 ReadyToRun 형태로도 빌드할 수 있습니다. 네이티브 C 버전만큼 작지는 않지만 JIT 비용을 줄이는 보조 경로입니다.
+
+If the .NET SDK is installed, the managed app can also be published as a .NET 10 ReadyToRun build. It is not as small as the native C build, but it reduces JIT work.
+
+```powershell
+.\build-dotnet.ps1
+.\build\dotnet-r2r\WinCapSimple.exe
+```
+
 ## 기능 / Features
 
 - 새 캡처 버튼 / New Capture button
@@ -40,6 +49,7 @@ The .NET Framework version builds without the .NET SDK by using the Windows C# c
 ```text
 build\WinCapNative.exe   Native Win32 fast-start build
 build\WinCapSimple.exe   .NET Framework WinForms build
+build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 ```
 
 네이티브 버전은 .NET, WinForms, C runtime 시작 경로를 피하고 `/NODEFAULTLIB`와 커스텀 entry point를 사용합니다. 캡처는 Win32 GDI `BitBlt` 기반입니다.
@@ -56,11 +66,13 @@ The native version avoids .NET, WinForms, and the C runtime startup path. It lin
 - 네이티브 디스플레이 연사는 가능한 경우 DXGI Output Duplication을 사용하고, 실패하면 GDI로 자동 fallback합니다. / Native display burst uses DXGI Output Duplication when available and automatically falls back to GDI.
 - 기본 캡처는 `CAPTUREBLT`를 끕니다. Layered 토글을 켜면 투명/레이어드 창이 포함될 수 있지만 더 느릴 수 있습니다. / Default capture leaves `CAPTUREBLT` off. The Layered toggle may include transparent/layered windows, but can be slower.
 - 자유형 마스크는 픽셀마다 전체 폴리곤을 검사하지 않고 스캔라인 구간 방식으로 처리합니다. / Freeform masking uses scanline spans instead of testing the full polygon per pixel.
+- .NET SDK 빌드는 `PublishReadyToRun`을 사용합니다. Windows Forms는 NativeAOT/트리밍 경로와 맞지 않으므로 이 프로젝트의 초고속 경로는 네이티브 C 빌드입니다. / The .NET SDK build uses `PublishReadyToRun`. Windows Forms does not fit the NativeAOT/trimming path, so the native C build remains this project's fastest path.
 
 ## 검증 / Verification
 
 ```powershell
 .\build\WinCapSimple.exe --self-test
+.\build\dotnet-r2r\WinCapSimple.exe --self-test
 .\build\WinCapNative.exe --self-test
 .\build\WinCapNative.exe --self-test-dxgi
 ```
