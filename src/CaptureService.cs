@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Threading;
 
@@ -138,6 +139,7 @@ namespace WinCapSimple
             }
 
             Directory.CreateDirectory(folder);
+            WriteBurstMetadata(folder, settings.IntervalMilliseconds);
 
             int frameCount = Math.Max(1, (settings.DurationSeconds * 1000) / settings.IntervalMilliseconds);
             List<string> files = new List<string>();
@@ -206,6 +208,13 @@ namespace WinCapSimple
                     SleepUntil(nextTick);
                 }
             }
+        }
+
+        private static void WriteBurstMetadata(string folder, int intervalMilliseconds)
+        {
+            File.WriteAllText(
+                Path.Combine(folder, "interval_ms.txt"),
+                intervalMilliseconds.ToString(CultureInfo.InvariantCulture));
         }
 
         public static string FindLatestBurstFolder()

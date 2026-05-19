@@ -14,6 +14,7 @@
 - 네이티브 빌드: Visual Studio Build Tools (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`).
 - .NET Framework 빌드: Windows 기본 설치된 .NET Framework 4.x. 별도 SDK 불필요.
 - .NET 10 R2R 빌드: .NET 10 SDK.
+- MP4/GIF 내보내기: `ffmpeg.exe`가 `PATH`에 있어야 합니다.
 
 ### 빠른 시작
 
@@ -57,6 +58,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 | DXGI Output Duplication | 디스플레이 연사에서 사용 | 미사용 | 미사용 |
 | Burst RAM 버퍼링 | ✓ | 부분 (DC/버퍼 재사용) | 부분 |
 | Burst 영역 외곽선 | ✓ | — | — |
+| Burst MP4/GIF 내보내기 | ffmpeg 사용 | ffmpeg 사용 | ffmpeg 사용 |
 
 ### 기능
 
@@ -64,6 +66,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 - 직사각형, 자유형, 창, 디스플레이 선택 캡처
 - 지연 캡처: 없음, 1초, 3초, 5초, 10초
 - 연사 캡처: 임시 폴더에 프레임 저장 후 보기에서 선택
+- 연사 캡처를 MP4 또는 GIF로 내보내기
 - 네이티브 연사 중 캡처 영역 외곽선 표시
 - Ctrl+C로 현재 캡처 복사, 넓은 붙여넣기 호환성을 위해 bitmap/DIB 포맷 제공
 - 기본 마커 도구
@@ -90,6 +93,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 ```
 
 - View Burst 버튼은 가장 최근 연사 폴더를 다시 엽니다. 메인 윈도우를 닫아도 디스크에 남아있으므로 같은 폴더를 다시 열 수 있습니다.
+- Burst Viewer의 MP4/GIF 버튼은 저장된 프레임을 `ffmpeg`로 인코딩합니다. 프레임 간격은 burst 폴더의 `interval_ms.txt`를 사용합니다.
 
 ### 성능 메모
 
@@ -97,6 +101,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 - 아이콘은 압축 ICO 리소스로 포함되며 실행 성능에 의미 있는 영향을 주지 않습니다.
 - 캡처 직후 자동 클립보드 합성을 하지 않고, Ctrl+C 또는 Copy 시점에만 합성합니다.
 - 연사 캡처는 캡처 버퍼와 GDI 리소스를 재사용합니다.
+- MP4/GIF 인코딩은 캡처 이후 사용자가 요청할 때만 실행되므로 burst 캡처 성능에는 영향을 주지 않습니다.
 - 네이티브 연사 캡처는 burst 중 1ms 타이머 해상도, 높은 스케줄링 우선순위, 단일 RAM 프레임 블록, 픽셀 재복사 없는 BMP 저장 경로를 사용합니다.
 - 네이티브 burst 영역 표시는 캡처 루프와 분리된 click-through overlay로 한 번만 띄우며, 가능한 경우 Windows 캡처 제외 속성을 적용합니다.
 - 네이티브 디스플레이 연사는 가능한 경우 DXGI Output Duplication을 사용하고, 실패하면 GDI로 자동 fallback합니다.
@@ -114,6 +119,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 - DRM 보호 콘텐츠는 어떤 경로로도 캡처되지 않습니다 (OS 정책).
 - DXGI Output Duplication은 회전된 디스플레이에서는 사용하지 않고 GDI로 자동 fallback합니다.
 - 네이티브 빌드의 디스플레이 연사 DXGI 가속은 `MODE_DISPLAY`에만 적용됩니다. 다른 모드는 GDI 경로를 사용합니다.
+- MP4/GIF 내보내기는 `ffmpeg.exe`가 없으면 실행되지 않습니다. MP4는 `libx264` 인코더가 포함된 ffmpeg 빌드가 필요합니다.
 
 ### 검증
 
@@ -162,6 +168,7 @@ Use `WinCapNative.exe` when startup speed matters most. The native version avoid
 - Native build: Visual Studio Build Tools (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`).
 - .NET Framework build: the .NET Framework 4.x that ships with Windows. No SDK required.
 - .NET 10 R2R build: the .NET 10 SDK.
+- MP4/GIF export: `ffmpeg.exe` must be available in `PATH`.
 
 ### Quick Start
 
@@ -205,6 +212,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 | DXGI Output Duplication | Display burst | — | — |
 | Burst RAM buffering | Yes | Partial (DC and buffer reuse) | Partial |
 | Burst area outline | Yes | — | — |
+| Burst MP4/GIF export | ffmpeg | ffmpeg | ffmpeg |
 
 ### Features
 
@@ -212,6 +220,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 - Rectangle, freeform, window, and display capture
 - Delay capture: none, 1s, 3s, 5s, 10s
 - Burst capture: saves frames to temp storage and lets you pick one later
+- Export burst captures to MP4 or GIF
 - Native burst shows a capture-area outline while recording
 - Ctrl+C copies the current capture and publishes bitmap/DIB formats for broad paste compatibility
 - Basic marker tool
@@ -238,6 +247,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 ```
 
 - The View Burst button reopens the most recent burst folder. Frames persist on disk, so the same folder can be reopened later.
+- The MP4/GIF buttons in Burst Viewer encode the saved frames through `ffmpeg`. Frame timing comes from `interval_ms.txt` in the burst folder.
 
 ### Performance Notes
 
@@ -245,6 +255,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 - The icon is embedded as a compressed ICO resource and should not meaningfully affect runtime performance.
 - Clipboard flattening runs only on Ctrl+C or Copy, not immediately after capture.
 - Burst capture reuses capture buffers and GDI resources.
+- MP4/GIF encoding runs only after capture when requested, so it does not affect burst capture performance.
 - Native burst capture uses 1ms timer resolution, elevated scheduling priority, one contiguous RAM frame block, and a BMP save path that avoids extra pixel copies.
 - The native burst outline is a one-time click-through overlay outside the capture loop, with Windows capture exclusion applied when available.
 - Native display burst uses DXGI Output Duplication when available and automatically falls back to GDI.
@@ -262,6 +273,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 - DRM-protected content cannot be captured by any path (OS policy).
 - DXGI Output Duplication is skipped on rotated displays and automatically falls back to GDI.
 - The native DXGI acceleration applies only to `MODE_DISPLAY` burst. Other modes use the GDI path.
+- MP4/GIF export does not run without `ffmpeg.exe`. MP4 requires an ffmpeg build that includes the `libx264` encoder.
 
 ### Verification
 

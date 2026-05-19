@@ -75,6 +75,8 @@ void *__cdecl memcpy(void *destination, const void *source, size_t size)
 #define IDC_VIEW_USE 4002
 #define IDC_VIEW_COPY 4003
 #define IDC_VIEW_CLOSE 4004
+#define IDC_VIEW_MP4 4005
+#define IDC_VIEW_GIF 4006
 
 #define MAX_MONITORS 16
 #define MAX_WINDOWS 256
@@ -197,7 +199,9 @@ typedef struct BurstViewerState
     BOOL done;
     BOOL ok;
     WCHAR files[MAX_BURST_FILES][MAX_PATH];
+    WCHAR folder[MAX_PATH];
     int count;
+    int intervalMilliseconds;
     BitmapImage preview;
     BitmapImage selected;
 } BurstViewerState;
@@ -1857,6 +1861,93 @@ static void MakeFramePath(const WCHAR *folder, int index, WCHAR *path)
     lstrcatW(path, name);
 }
 
+static void MakeBurstMetadataPath(const WCHAR *folder, WCHAR *path)
+{
+    lstrcpyW(path, folder);
+    lstrcatW(path, L"\\interval_ms.txt");
+}
+
+static int WriteAsciiInt(char *buffer, int value)
+{
+    char temp[16];
+    int count = 0;
+    int i;
+    if (value <= 0)
+    {
+        buffer[0] = '0';
+        return 1;
+    }
+    while (value > 0 && count < 15)
+    {
+        temp[count++] = (char)('0' + (value % 10));
+        value /= 10;
+    }
+    for (i = 0; i < count; ++i)
+    {
+        buffer[i] = temp[count - 1 - i];
+    }
+    return count;
+}
+
+static void WriteBurstMetadata(const WCHAR *folder, int intervalMilliseconds)
+{
+    WCHAR path[MAX_PATH];
+    HANDLE file;
+    DWORD written;
+    char text[18];
+    int count;
+    MakeBurstMetadataPath(folder, path);
+    file = CreateFileW(path, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+    count = WriteAsciiInt(text, intervalMilliseconds);
+    text[count++] = '\r';
+    text[count++] = '\n';
+    WriteFile(file, text, (DWORD)count, &written, 0);
+    CloseHandle(file);
+}
+
+static int ReadBurstIntervalMilliseconds(const WCHAR *folder)
+{
+    WCHAR path[MAX_PATH];
+    HANDLE file;
+    DWORD read;
+    char text[32];
+    int value = 0;
+    int i;
+    MakeBurstMetadataPath(folder, path);
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return 250;
+    }
+    ZeroMemory(text, sizeof(text));
+    if (!ReadFile(file, text, sizeof(text) - 1, &read, 0))
+    {
+        CloseHandle(file);
+        return 250;
+    }
+    CloseHandle(file);
+    for (i = 0; i < (int)read; ++i)
+    {
+        if (text[i] >= '0' && text[i] <= '9')
+        {
+            value = value * 10 + (text[i] - '0');
+        }
+        else if (value > 0)
+        {
+            break;
+        }
+    }
+    if (value < 50)
+    {
+        value = 250;
+    }
+    return value;
+}
+
 static BOOL CreateBurstFrameStore(BurstFrameStore *store, int frameCount, DWORD frameBytes)
 {
     int i;
@@ -2663,6 +2754,7 @@ static void RunBurstCapture(void)
     }
     marker = ShowBurstMarker(&target, &markerState);
     CreateBurstFolder(folder);
+    WriteBurstMetadata(folder, intervalMilliseconds);
     saved = CaptureBurstFrames(&target, durationSeconds, intervalMilliseconds, folder);
     if (marker)
     {
@@ -2789,6 +2881,142 @@ static void ViewerCopySelected(BurstViewerState *state)
     }
 }
 
+static BOOL AppendCommandText(WCHAR *command, int capacity, const WCHAR *text)
+{
+    int length = lstrlenW(command);
+    int add = lstrlenW(text);
+    if (length + add + 1 >= capacity)
+    {
+        return FALSE;
+    }
+    lstrcatW(command, text);
+    return TRUE;
+}
+
+static BOOL AppendCommandInt(WCHAR *command, int capacity, int value)
+{
+    WCHAR text[32];
+    wsprintfW(text, L"%d", value);
+    return AppendCommandText(command, capacity, text);
+}
+
+static BOOL AppendCommandQuotedArg(WCHAR *command, int capacity, const WCHAR *text)
+{
+    return AppendCommandText(command, capacity, L"\"") &&
+        AppendCommandText(command, capacity, text) &&
+        AppendCommandText(command, capacity, L"\"");
+}
+
+static BOOL PromptBurstExportPath(HWND owner, BOOL mp4, WCHAR *path)
+{
+    OPENFILENAMEW ofn;
+    ZeroMemory(path, sizeof(WCHAR) * MAX_PATH);
+    lstrcpyW(path, mp4 ? L"burst.mp4" : L"burst.gif");
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = mp4 ? L"MP4 video (*.mp4)\0*.mp4\0\0" : L"GIF image (*.gif)\0*.gif\0\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = mp4 ? L"mp4" : L"gif";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    return GetSaveFileNameW(&ofn);
+}
+
+static BOOL BuildBurstExportCommand(const BurstViewerState *state, BOOL mp4, const WCHAR *outputPath, WCHAR *command, int capacity)
+{
+    WCHAR pattern[MAX_PATH];
+    command[0] = 0;
+    lstrcpyW(pattern, state->folder);
+    lstrcatW(pattern, L"\\frame_%04d.bmp");
+
+    if (!AppendCommandText(command, capacity, L"ffmpeg.exe -y -hide_banner -loglevel error -framerate 1000/") ||
+        !AppendCommandInt(command, capacity, state->intervalMilliseconds) ||
+        !AppendCommandText(command, capacity, L" -i ") ||
+        !AppendCommandQuotedArg(command, capacity, pattern))
+    {
+        return FALSE;
+    }
+
+    if (mp4)
+    {
+        if (!AppendCommandText(command, capacity, L" -vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2\" -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p -movflags +faststart "))
+        {
+            return FALSE;
+        }
+    }
+    else
+    {
+        if (!AppendCommandText(command, capacity, L" -loop 0 "))
+        {
+            return FALSE;
+        }
+    }
+
+    return AppendCommandQuotedArg(command, capacity, outputPath);
+}
+
+static BOOL RunExportCommand(HWND owner, WCHAR *command)
+{
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION process;
+    DWORD exitCode = 1;
+    ZeroMemory(&startup, sizeof(startup));
+    ZeroMemory(&process, sizeof(process));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessW(0, command, 0, 0, FALSE, CREATE_NO_WINDOW, 0, 0, &startup, &process))
+    {
+        MessageBoxW(owner, L"ffmpeg.exe was not found in PATH.", L"Export failed", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    WaitForSingleObject(process.hProcess, INFINITE);
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    if (exitCode != 0)
+    {
+        MessageBoxW(owner, L"ffmpeg failed to encode the burst.", L"Export failed", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void ViewerExportBurst(BurstViewerState *state, BOOL mp4)
+{
+    WCHAR outputPath[MAX_PATH];
+    WCHAR *command;
+    if (!state || state->count <= 0)
+    {
+        return;
+    }
+    if (!PromptBurstExportPath(state->hwnd, mp4, outputPath))
+    {
+        return;
+    }
+    command = (WCHAR *)AllocZero(sizeof(WCHAR) * 4096);
+    if (!command)
+    {
+        MessageBoxW(state->hwnd, L"Could not allocate export command buffer.", L"Export failed", MB_OK | MB_ICONERROR);
+        return;
+    }
+    if (!BuildBurstExportCommand(state, mp4, outputPath, command, 4096))
+    {
+        FreeMem(command);
+        MessageBoxW(state->hwnd, L"Export command is too long.", L"Export failed", MB_OK | MB_ICONERROR);
+        return;
+    }
+    SetWindowTextW(state->hwnd, mp4 ? L"Burst Viewer - exporting MP4" : L"Burst Viewer - exporting GIF");
+    if (RunExportCommand(state->hwnd, command))
+    {
+        SetWindowTextW(state->hwnd, mp4 ? L"Burst Viewer - MP4 exported" : L"Burst Viewer - GIF exported");
+    }
+    else
+    {
+        SetWindowTextW(state->hwnd, L"Burst Viewer");
+    }
+    FreeMem(command);
+}
+
 static LRESULT CALLBACK BurstViewerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     BurstViewerState *state = (BurstViewerState *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -2809,14 +3037,18 @@ static LRESULT CALLBACK BurstViewerProc(HWND hwnd, UINT message, WPARAM wParam, 
         state->list = CreateWindowW(L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL, 12, 12, 180, 520, hwnd, (HMENU)IDC_VIEW_LIST, g_instance, 0);
         CreateWindowW(L"BUTTON", L"Use", WS_CHILD | WS_VISIBLE, 520, 540, 80, 28, hwnd, (HMENU)IDC_VIEW_USE, g_instance, 0);
         CreateWindowW(L"BUTTON", L"Copy", WS_CHILD | WS_VISIBLE, 610, 540, 80, 28, hwnd, (HMENU)IDC_VIEW_COPY, g_instance, 0);
+        CreateWindowW(L"BUTTON", L"MP4", WS_CHILD | WS_VISIBLE, 700, 540, 80, 28, hwnd, (HMENU)IDC_VIEW_MP4, g_instance, 0);
+        CreateWindowW(L"BUTTON", L"GIF", WS_CHILD | WS_VISIBLE, 790, 540, 80, 28, hwnd, (HMENU)IDC_VIEW_GIF, g_instance, 0);
         CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE, 700, 540, 80, 28, hwnd, (HMENU)IDC_VIEW_CLOSE, g_instance, 0);
         return 0;
     case WM_SIZE:
         GetClientRect(hwnd, &client);
         MoveWindow(state->list, 12, 12, 190, client.bottom - 58, TRUE);
         MoveWindow(GetDlgItem(hwnd, IDC_VIEW_CLOSE), client.right - 92, client.bottom - 38, 80, 28, TRUE);
-        MoveWindow(GetDlgItem(hwnd, IDC_VIEW_COPY), client.right - 182, client.bottom - 38, 80, 28, TRUE);
-        MoveWindow(GetDlgItem(hwnd, IDC_VIEW_USE), client.right - 272, client.bottom - 38, 80, 28, TRUE);
+        MoveWindow(GetDlgItem(hwnd, IDC_VIEW_GIF), client.right - 182, client.bottom - 38, 80, 28, TRUE);
+        MoveWindow(GetDlgItem(hwnd, IDC_VIEW_MP4), client.right - 272, client.bottom - 38, 80, 28, TRUE);
+        MoveWindow(GetDlgItem(hwnd, IDC_VIEW_COPY), client.right - 362, client.bottom - 38, 80, 28, TRUE);
+        MoveWindow(GetDlgItem(hwnd, IDC_VIEW_USE), client.right - 452, client.bottom - 38, 80, 28, TRUE);
         return 0;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_VIEW_LIST && HIWORD(wParam) == LBN_SELCHANGE)
@@ -2837,6 +3069,16 @@ static LRESULT CALLBACK BurstViewerProc(HWND hwnd, UINT message, WPARAM wParam, 
         if (LOWORD(wParam) == IDC_VIEW_COPY)
         {
             ViewerCopySelected(state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_VIEW_MP4)
+        {
+            ViewerExportBurst(state, TRUE);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_VIEW_GIF)
+        {
+            ViewerExportBurst(state, FALSE);
             return 0;
         }
         if (LOWORD(wParam) == IDC_VIEW_CLOSE)
@@ -2894,6 +3136,8 @@ static BOOL ShowBurstViewer(HWND owner, const WCHAR *folder, BitmapImage *select
     {
         return FALSE;
     }
+    lstrcpyW(state->folder, folder);
+    state->intervalMilliseconds = ReadBurstIntervalMilliseconds(folder);
     EnableWindow(owner, FALSE);
     CreateWindowExW(WS_EX_DLGMODALFRAME, VIEWER_CLASS, L"Burst Viewer", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         CW_USEDEFAULT, CW_USEDEFAULT, 860, 640, owner, 0, g_instance, state);

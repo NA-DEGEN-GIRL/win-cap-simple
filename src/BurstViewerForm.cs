@@ -1,6 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Windows.Forms;
 
@@ -14,14 +16,18 @@ namespace WinCapSimple
         private readonly Button _useButton = new Button();
         private readonly Button _copyButton = new Button();
         private readonly Button _saveButton = new Button();
+        private readonly Button _mp4Button = new Button();
+        private readonly Button _gifButton = new Button();
         private readonly Button _closeButton = new Button();
         private Bitmap _clipboardImage;
+        private readonly int _intervalMilliseconds;
 
         public Bitmap SelectedImage;
 
         public BurstViewerForm(string folder)
         {
             _folder = folder;
+            _intervalMilliseconds = ReadBurstIntervalMilliseconds(folder);
 
             Text = "Burst Viewer";
             StartPosition = FormStartPosition.CenterParent;
@@ -66,10 +72,20 @@ namespace WinCapSimple
             _saveButton.Size = new Size(84, 28);
             _saveButton.Click += delegate { SaveSelected(); };
 
+            _mp4Button.Text = "MP4";
+            _mp4Button.Size = new Size(84, 28);
+            _mp4Button.Click += delegate { ExportBurst(true); };
+
+            _gifButton.Text = "GIF";
+            _gifButton.Size = new Size(84, 28);
+            _gifButton.Click += delegate { ExportBurst(false); };
+
             buttons.Controls.Add(_closeButton);
             buttons.Controls.Add(_useButton);
             buttons.Controls.Add(_copyButton);
             buttons.Controls.Add(_saveButton);
+            buttons.Controls.Add(_mp4Button);
+            buttons.Controls.Add(_gifButton);
 
             Controls.Add(split);
             Controls.Add(buttons);
@@ -196,6 +212,95 @@ namespace WinCapSimple
                     }
                 }
             }
+        }
+
+        private void ExportBurst(bool mp4)
+        {
+            if (_frames.Items.Count == 0)
+            {
+                return;
+            }
+
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Filter = mp4 ? "MP4 video (*.mp4)|*.mp4" : "GIF image (*.gif)|*.gif";
+                dialog.DefaultExt = mp4 ? "mp4" : "gif";
+                dialog.FileName = mp4 ? "burst.mp4" : "burst.gif";
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                string oldTitle = Text;
+                try
+                {
+                    Text = mp4 ? "Burst Viewer - exporting MP4" : "Burst Viewer - exporting GIF";
+                    UseWaitCursor = true;
+                    Application.DoEvents();
+                    RunFfmpeg(mp4, dialog.FileName);
+                    Text = mp4 ? "Burst Viewer - MP4 exported" : "Burst Viewer - GIF exported";
+                }
+                catch (Exception ex)
+                {
+                    Text = oldTitle;
+                    MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    UseWaitCursor = false;
+                }
+            }
+        }
+
+        private void RunFfmpeg(bool mp4, string outputFile)
+        {
+            string pattern = Path.Combine(_folder, "frame_%04d.png");
+            string arguments = "-y -hide_banner -loglevel error -framerate 1000/" +
+                _intervalMilliseconds.ToString(CultureInfo.InvariantCulture) +
+                " -i " + QuoteArg(pattern);
+
+            if (mp4)
+            {
+                arguments += " -vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2\" -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p -movflags +faststart ";
+            }
+            else
+            {
+                arguments += " -loop 0 ";
+            }
+
+            arguments += QuoteArg(outputFile);
+
+            ProcessStartInfo info = new ProcessStartInfo("ffmpeg.exe", arguments);
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+
+            using (Process process = Process.Start(info))
+            {
+                process.WaitForExit();
+                if (process.ExitCode != 0)
+                {
+                    throw new InvalidOperationException("ffmpeg failed to encode the burst.");
+                }
+            }
+        }
+
+        private static string QuoteArg(string value)
+        {
+            return "\"" + value.Replace("\"", "\\\"") + "\"";
+        }
+
+        private static int ReadBurstIntervalMilliseconds(string folder)
+        {
+            int interval;
+            string file = Path.Combine(folder, "interval_ms.txt");
+            if (File.Exists(file) &&
+                int.TryParse(File.ReadAllText(file).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out interval) &&
+                interval >= 50)
+            {
+                return interval;
+            }
+
+            return 250;
         }
 
         private string GetSelectedFile()
