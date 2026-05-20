@@ -61,6 +61,11 @@ void *__cdecl memcpy(void *destination, const void *source, size_t size)
 #define IDC_CLEAR 1012
 #define IDC_STATUS 1013
 #define IDC_CAPTUREBLT 1014
+#define IDC_ROTATE_LEFT 1015
+#define IDC_ROTATE_RIGHT 1016
+#define IDC_FLIP_H 1017
+#define IDC_FLIP_V 1018
+#define IDC_WIDTH_LABEL 1019
 
 #define IDC_PICK_LIST 2001
 #define IDC_PICK_OK 2002
@@ -81,6 +86,11 @@ void *__cdecl memcpy(void *destination, const void *source, size_t size)
 #define MAX_MONITORS 16
 #define MAX_WINDOWS 256
 #define MAX_BURST_FILES 4096
+
+#define TRANSFORM_ROTATE_LEFT 1
+#define TRANSFORM_ROTATE_RIGHT 2
+#define TRANSFORM_FLIP_H 3
+#define TRANSFORM_FLIP_V 4
 
 typedef enum CaptureMode
 {
@@ -262,6 +272,11 @@ static BOOL g_monitorsLoaded;
 static WCHAR g_lastBurstFolder[MAX_PATH];
 static POINT *g_scratchPoints;
 static int g_scratchPointCapacity;
+static HDC g_mainPaintDc;
+static HBITMAP g_mainPaintBitmap;
+static HGDIOBJ g_mainPaintOldBitmap;
+static int g_mainPaintWidth;
+static int g_mainPaintHeight;
 static HMODULE g_winmmModule;
 static HMODULE g_avrtModule;
 static AvSetMmThreadCharacteristicsProc g_avSetMmThreadCharacteristics;
@@ -347,6 +362,57 @@ static POINT *GetScratchPoints(int count)
         g_scratchPointCapacity = count;
     }
     return g_scratchPoints;
+}
+
+static void ReleaseMainPaintBuffer(void)
+{
+    if (g_mainPaintDc)
+    {
+        if (g_mainPaintOldBitmap)
+        {
+            SelectObject(g_mainPaintDc, g_mainPaintOldBitmap);
+        }
+        DeleteDC(g_mainPaintDc);
+    }
+    if (g_mainPaintBitmap)
+    {
+        DeleteObject(g_mainPaintBitmap);
+    }
+    g_mainPaintDc = 0;
+    g_mainPaintBitmap = 0;
+    g_mainPaintOldBitmap = 0;
+    g_mainPaintWidth = 0;
+    g_mainPaintHeight = 0;
+}
+
+static BOOL EnsureMainPaintBuffer(HDC referenceDc, int width, int height)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return FALSE;
+    }
+    if (g_mainPaintDc && g_mainPaintBitmap && g_mainPaintWidth == width && g_mainPaintHeight == height)
+    {
+        return TRUE;
+    }
+
+    ReleaseMainPaintBuffer();
+    g_mainPaintDc = CreateCompatibleDC(referenceDc);
+    g_mainPaintBitmap = CreateCompatibleBitmap(referenceDc, width, height);
+    if (!g_mainPaintDc || !g_mainPaintBitmap)
+    {
+        ReleaseMainPaintBuffer();
+        return FALSE;
+    }
+    g_mainPaintOldBitmap = SelectObject(g_mainPaintDc, g_mainPaintBitmap);
+    if (!g_mainPaintOldBitmap)
+    {
+        ReleaseMainPaintBuffer();
+        return FALSE;
+    }
+    g_mainPaintWidth = width;
+    g_mainPaintHeight = height;
+    return TRUE;
 }
 
 static void SetStatusText(const WCHAR *text)
@@ -844,7 +910,7 @@ static void ReplaceCurrentImage(BitmapImage *image)
     FreeStrokes();
     g_image = *image;
     ZeroMemory(image, sizeof(*image));
-    InvalidateRect(g_main, 0, TRUE);
+    InvalidateRect(g_main, 0, FALSE);
 }
 
 static void GetPreviewRect(HWND hwnd, RECT *rect)
@@ -897,6 +963,13 @@ static BOOL ClientToImagePoint(HWND hwnd, int x, int y, POINT *point)
     if (point->x >= g_image.width) point->x = g_image.width - 1;
     if (point->y >= g_image.height) point->y = g_image.height - 1;
     return TRUE;
+}
+
+static void InvalidatePreview(HWND hwnd)
+{
+    RECT preview;
+    GetPreviewRect(hwnd, &preview);
+    InvalidateRect(hwnd, &preview, FALSE);
 }
 
 static void DrawStrokes(HDC dc, RECT destination, int imageWidth, int imageHeight)
@@ -976,6 +1049,71 @@ static BOOL CreateFlattenedImage(BitmapImage *flat)
     DeleteDC(src);
     DeleteDC(dst);
     ReleaseDC(0, screen);
+    return TRUE;
+}
+
+static BOOL TransformCurrentImage(int operation)
+{
+    BitmapImage flat;
+    BitmapImage transformed;
+    int destinationWidth;
+    int destinationHeight;
+    int x;
+    int y;
+    ZeroMemory(&flat, sizeof(flat));
+    ZeroMemory(&transformed, sizeof(transformed));
+    if (!CreateFlattenedImage(&flat))
+    {
+        return FALSE;
+    }
+
+    destinationWidth = flat.width;
+    destinationHeight = flat.height;
+    if (operation == TRANSFORM_ROTATE_LEFT || operation == TRANSFORM_ROTATE_RIGHT)
+    {
+        destinationWidth = flat.height;
+        destinationHeight = flat.width;
+    }
+
+    if (!CreateBitmapImage(&transformed, destinationWidth, destinationHeight))
+    {
+        FreeBitmapImage(&flat);
+        return FALSE;
+    }
+
+    for (y = 0; y < flat.height; ++y)
+    {
+        DWORD *source = (DWORD *)((BYTE *)flat.bits + y * flat.stride);
+        for (x = 0; x < flat.width; ++x)
+        {
+            int destinationX = x;
+            int destinationY = y;
+            DWORD *row;
+            if (operation == TRANSFORM_ROTATE_RIGHT)
+            {
+                destinationX = flat.height - 1 - y;
+                destinationY = x;
+            }
+            else if (operation == TRANSFORM_ROTATE_LEFT)
+            {
+                destinationX = y;
+                destinationY = flat.width - 1 - x;
+            }
+            else if (operation == TRANSFORM_FLIP_H)
+            {
+                destinationX = flat.width - 1 - x;
+            }
+            else if (operation == TRANSFORM_FLIP_V)
+            {
+                destinationY = flat.height - 1 - y;
+            }
+            row = (DWORD *)((BYTE *)transformed.bits + destinationY * transformed.stride);
+            row[destinationX] = source[x];
+        }
+    }
+
+    FreeBitmapImage(&flat);
+    ReplaceCurrentImage(&transformed);
     return TRUE;
 }
 
@@ -1119,9 +1257,11 @@ static COLORREF GetSelectedColor(void)
 static int GetSelectedWidth(void)
 {
     LRESULT index = SendMessageW(g_controls[IDC_WIDTH - 1000], CB_GETCURSEL, 0, 0);
-    if (index == 0) return 3;
-    if (index == 2) return 10;
-    if (index == 3) return 16;
+    if (index == 0) return 1;
+    if (index == 1) return 3;
+    if (index == 3) return 10;
+    if (index == 4) return 16;
+    if (index == 5) return 24;
     return 6;
 }
 
@@ -3217,8 +3357,13 @@ static void LayoutMain(HWND hwnd)
     LayoutControlWrapped(g_controls[IDC_VIEW_BURST - 1000], &x, &y, 82, 28, client.right);
     LayoutControlWrapped(g_controls[IDC_COPY - 1000], &x, &y, 62, 28, client.right);
     LayoutControlWrapped(g_controls[IDC_SAVE - 1000], &x, &y, 62, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_ROTATE_LEFT - 1000], &x, &y, 58, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_ROTATE_RIGHT - 1000], &x, &y, 58, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_FLIP_H - 1000], &x, &y, 60, 28, client.right);
+    LayoutControlWrapped(g_controls[IDC_FLIP_V - 1000], &x, &y, 60, 28, client.right);
     LayoutControlWrapped(g_controls[IDC_MARKER - 1000], &x, &y, 70, 28, client.right);
     LayoutControlWrapped(g_controls[IDC_COLOR - 1000], &x, &y, 80, 220, client.right);
+    LayoutControlWrapped(g_controls[IDC_WIDTH_LABEL - 1000], &x, &y, 42, 28, client.right);
     LayoutControlWrapped(g_controls[IDC_WIDTH - 1000], &x, &y, 66, 220, client.right);
     LayoutControlWrapped(g_controls[IDC_CAPTUREBLT - 1000], &x, &y, 82, 28, client.right);
     LayoutControlWrapped(g_controls[IDC_CLEAR - 1000], &x, &y, 86, 28, client.right);
@@ -3229,7 +3374,7 @@ static void LayoutMain(HWND hwnd)
         statusWidth = 1;
     }
     MoveWindow(g_controls[IDC_STATUS - 1000], 8, client.bottom - 24, statusWidth, 20, TRUE);
-    InvalidateRect(hwnd, 0, TRUE);
+    InvalidateRect(hwnd, 0, FALSE);
 }
 
 static void AddComboItem(HWND combo, const WCHAR *text)
@@ -3268,6 +3413,10 @@ static void CreateMainControls(HWND hwnd)
     CreateControl(hwnd, L"BUTTON", L"View", BS_PUSHBUTTON, IDC_VIEW_BURST);
     CreateControl(hwnd, L"BUTTON", L"Copy", BS_PUSHBUTTON, IDC_COPY);
     CreateControl(hwnd, L"BUTTON", L"Save", BS_PUSHBUTTON, IDC_SAVE);
+    CreateControl(hwnd, L"BUTTON", L"Rot L", BS_PUSHBUTTON, IDC_ROTATE_LEFT);
+    CreateControl(hwnd, L"BUTTON", L"Rot R", BS_PUSHBUTTON, IDC_ROTATE_RIGHT);
+    CreateControl(hwnd, L"BUTTON", L"Flip H", BS_PUSHBUTTON, IDC_FLIP_H);
+    CreateControl(hwnd, L"BUTTON", L"Flip V", BS_PUSHBUTTON, IDC_FLIP_V);
     CreateControl(hwnd, L"BUTTON", L"Marker", BS_AUTOCHECKBOX | BS_PUSHLIKE, IDC_MARKER);
     combo = CreateControl(hwnd, L"COMBOBOX", 0, CBS_DROPDOWNLIST | WS_VSCROLL, IDC_COLOR);
     AddComboItem(combo, L"Red");
@@ -3275,12 +3424,15 @@ static void CreateMainControls(HWND hwnd)
     AddComboItem(combo, L"Blue");
     AddComboItem(combo, L"Black");
     SendMessageW(combo, CB_SETCURSEL, 0, 0);
+    CreateControl(hwnd, L"STATIC", L"Width", SS_LEFT | SS_CENTERIMAGE, IDC_WIDTH_LABEL);
     combo = CreateControl(hwnd, L"COMBOBOX", 0, CBS_DROPDOWNLIST | WS_VSCROLL, IDC_WIDTH);
+    AddComboItem(combo, L"1 px");
     AddComboItem(combo, L"3 px");
     AddComboItem(combo, L"6 px");
     AddComboItem(combo, L"10 px");
     AddComboItem(combo, L"16 px");
-    SendMessageW(combo, CB_SETCURSEL, 1, 0);
+    AddComboItem(combo, L"24 px");
+    SendMessageW(combo, CB_SETCURSEL, 2, 0);
     CreateControl(hwnd, L"BUTTON", L"Layered", BS_AUTOCHECKBOX | BS_PUSHLIKE, IDC_CAPTUREBLT);
     CreateControl(hwnd, L"BUTTON", L"Clear", BS_PUSHBUTTON, IDC_CLEAR);
     CreateControl(hwnd, L"STATIC", L"Ready.", SS_LEFT, IDC_STATUS);
@@ -3292,29 +3444,46 @@ static void PaintMain(HWND hwnd)
     HDC dc;
     RECT client;
     RECT preview;
-    HDC memory;
-    HGDIOBJ oldBitmap;
+    HDC imageDc;
+    HGDIOBJ oldImageBitmap;
     dc = BeginPaint(hwnd, &ps);
     GetClientRect(hwnd, &client);
-    FillRect(dc, &client, (HBRUSH)(COLOR_BTNFACE + 1));
+    if (RectWidth(client) <= 0 || RectHeight(client) <= 0)
+    {
+        EndPaint(hwnd, &ps);
+        return;
+    }
+
+    if (!EnsureMainPaintBuffer(dc, RectWidth(client), RectHeight(client)))
+    {
+        FillRect(dc, &client, (HBRUSH)(COLOR_BTNFACE + 1));
+        EndPaint(hwnd, &ps);
+        return;
+    }
+
+    FillRect(g_mainPaintDc, &client, (HBRUSH)(COLOR_BTNFACE + 1));
     GetPreviewRect(hwnd, &preview);
-    FillRect(dc, &preview, (HBRUSH)(COLOR_WINDOW + 1));
+    FillRect(g_mainPaintDc, &preview, (HBRUSH)(COLOR_WINDOW + 1));
     if (g_image.bitmap)
     {
-        memory = CreateCompatibleDC(dc);
-        oldBitmap = SelectObject(memory, g_image.bitmap);
-        SetStretchBltMode(dc, HALFTONE);
-        StretchBlt(dc, preview.left, preview.top, RectWidth(preview), RectHeight(preview), memory, 0, 0, g_image.width, g_image.height, SRCCOPY);
-        SelectObject(memory, oldBitmap);
-        DeleteDC(memory);
-        DrawStrokes(dc, preview, g_image.width, g_image.height);
+        imageDc = CreateCompatibleDC(g_mainPaintDc);
+        if (imageDc)
+        {
+            oldImageBitmap = SelectObject(imageDc, g_image.bitmap);
+            SetStretchBltMode(g_mainPaintDc, HALFTONE);
+            StretchBlt(g_mainPaintDc, preview.left, preview.top, RectWidth(preview), RectHeight(preview), imageDc, 0, 0, g_image.width, g_image.height, SRCCOPY);
+            SelectObject(imageDc, oldImageBitmap);
+            DeleteDC(imageDc);
+        }
+        DrawStrokes(g_mainPaintDc, preview, g_image.width, g_image.height);
     }
     else
     {
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(110, 116, 126));
-        DrawTextW(dc, L"New Capture", 11, &preview, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SetBkMode(g_mainPaintDc, TRANSPARENT);
+        SetTextColor(g_mainPaintDc, RGB(110, 116, 126));
+        DrawTextW(g_mainPaintDc, L"New Capture", 11, &preview, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
+    BitBlt(dc, 0, 0, RectWidth(client), RectHeight(client), g_mainPaintDc, 0, 0, SRCCOPY);
     EndPaint(hwnd, &ps);
 }
 
@@ -3331,7 +3500,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         return 0;
     case WM_SIZE:
         LayoutMain(hwnd);
-        InvalidateRect(hwnd, 0, TRUE);
+        InvalidateRect(hwnd, 0, FALSE);
         return 0;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_NEW)
@@ -3359,6 +3528,26 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
             SaveCurrentImage();
             return 0;
         }
+        if (LOWORD(wParam) == IDC_ROTATE_LEFT)
+        {
+            SetStatusText(TransformCurrentImage(TRANSFORM_ROTATE_LEFT) ? L"Rotated left." : L"Nothing to transform.");
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_ROTATE_RIGHT)
+        {
+            SetStatusText(TransformCurrentImage(TRANSFORM_ROTATE_RIGHT) ? L"Rotated right." : L"Nothing to transform.");
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_FLIP_H)
+        {
+            SetStatusText(TransformCurrentImage(TRANSFORM_FLIP_H) ? L"Flipped horizontal." : L"Nothing to transform.");
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_FLIP_V)
+        {
+            SetStatusText(TransformCurrentImage(TRANSFORM_FLIP_V) ? L"Flipped vertical." : L"Nothing to transform.");
+            return 0;
+        }
         if (LOWORD(wParam) == IDC_MARKER)
         {
             g_markerEnabled = SendMessageW(g_controls[IDC_MARKER - 1000], BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -3383,7 +3572,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         if (LOWORD(wParam) == IDC_CLEAR)
         {
             FreeStrokes();
-            InvalidateRect(hwnd, 0, TRUE);
+            InvalidatePreview(hwnd);
             SetStatusText(L"Marks cleared.");
             return 0;
         }
@@ -3407,6 +3596,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
                 g_strokes = stroke;
                 g_activeStroke = stroke;
                 SetCapture(hwnd);
+                InvalidatePreview(hwnd);
             }
             return 0;
         }
@@ -3418,7 +3608,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
                 AbsInt(g_activeStroke->points[g_activeStroke->count - 1].x - imagePoint.x) + AbsInt(g_activeStroke->points[g_activeStroke->count - 1].y - imagePoint.y) >= 1)
             {
                 StrokeAppend(g_activeStroke, imagePoint);
-                InvalidateRect(hwnd, 0, FALSE);
+                InvalidatePreview(hwnd);
             }
             return 0;
         }
@@ -3443,6 +3633,8 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
             return 0;
         }
         break;
+    case WM_ERASEBKGND:
+        return 1;
     case WM_PAINT:
         PaintMain(hwnd);
         return 0;
@@ -3450,6 +3642,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         FreeBitmapImage(&g_image);
         FreeStrokes();
         ReleaseDxgiDeviceCache();
+        ReleaseMainPaintBuffer();
         FreeMem(g_scratchPoints);
         g_scratchPoints = 0;
         g_scratchPointCapacity = 0;

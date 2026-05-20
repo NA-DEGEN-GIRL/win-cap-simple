@@ -23,7 +23,7 @@ namespace WinCapSimple
             Dock = DockStyle.Fill;
             DoubleBuffered = true;
             TabStop = true;
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         }
 
         public bool HasImage
@@ -47,6 +47,19 @@ namespace WinCapSimple
         {
             _strokes.Clear();
             Invalidate();
+        }
+
+        public bool RotateFlipCurrent(RotateFlipType rotateFlipType)
+        {
+            if (_image == null)
+            {
+                return false;
+            }
+
+            Bitmap transformed = CreateFlattenedImage();
+            transformed.RotateFlip(rotateFlipType);
+            SetImage(transformed);
+            return true;
         }
 
         public Bitmap CreateFlattenedImage()
@@ -93,7 +106,7 @@ namespace WinCapSimple
                     _activeStroke.Width = MarkerWidth;
                     _activeStroke.Points.Add(imagePoint);
                     _strokes.Add(_activeStroke);
-                    Invalidate();
+                    InvalidateStrokeSegment(imagePoint, imagePoint, _activeStroke.Width);
                 }
             }
 
@@ -112,7 +125,7 @@ namespace WinCapSimple
                     if (Math.Abs(last.X - imagePoint.X) + Math.Abs(last.Y - imagePoint.Y) >= 1.0f)
                     {
                         points.Add(imagePoint);
-                        Invalidate();
+                        InvalidateStrokeSegment(last, imagePoint, _activeStroke.Width);
                     }
                 }
             }
@@ -124,6 +137,10 @@ namespace WinCapSimple
         {
             _activeStroke = null;
             base.OnMouseUp(e);
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs pevent)
+        {
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -229,6 +246,37 @@ namespace WinCapSimple
             float width = _image.Width * scale;
             float height = _image.Height * scale;
             return new RectangleF((Width - width) / 2.0f, (Height - height) / 2.0f, width, height);
+        }
+
+        private void InvalidateStrokeSegment(PointF a, PointF b, float imageWidth)
+        {
+            if (_image == null)
+            {
+                Invalidate();
+                return;
+            }
+
+            RectangleF imageRect = GetImageRectangle();
+            if (imageRect.Width <= 0.0f || imageRect.Height <= 0.0f)
+            {
+                Invalidate();
+                return;
+            }
+
+            float scale = imageRect.Width / _image.Width;
+            PointF clientA = Transform(a, scale, imageRect.X, imageRect.Y);
+            PointF clientB = Transform(b, scale, imageRect.X, imageRect.Y);
+            float left = Math.Min(clientA.X, clientB.X);
+            float top = Math.Min(clientA.Y, clientB.Y);
+            float right = Math.Max(clientA.X, clientB.X);
+            float bottom = Math.Max(clientA.Y, clientB.Y);
+            float padding = Math.Max(4.0f, imageWidth * scale + 4.0f);
+            Rectangle dirty = Rectangle.FromLTRB(
+                (int)Math.Floor(left - padding),
+                (int)Math.Floor(top - padding),
+                (int)Math.Ceiling(right + padding),
+                (int)Math.Ceiling(bottom + padding));
+            Invalidate(dirty);
         }
     }
 }

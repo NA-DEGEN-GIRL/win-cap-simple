@@ -137,6 +137,18 @@ namespace WinCapSimple
             ToolStripButton saveButton = new ToolStripButton("Save");
             saveButton.Click += delegate { SaveCurrent(); };
 
+            ToolStripButton rotateLeftButton = new ToolStripButton("Rot L");
+            rotateLeftButton.Click += delegate { TransformCurrent(RotateFlipType.Rotate270FlipNone, "Rotated left."); };
+
+            ToolStripButton rotateRightButton = new ToolStripButton("Rot R");
+            rotateRightButton.Click += delegate { TransformCurrent(RotateFlipType.Rotate90FlipNone, "Rotated right."); };
+
+            ToolStripButton flipHorizontalButton = new ToolStripButton("Flip H");
+            flipHorizontalButton.Click += delegate { TransformCurrent(RotateFlipType.RotateNoneFlipX, "Flipped horizontal."); };
+
+            ToolStripButton flipVerticalButton = new ToolStripButton("Flip V");
+            flipVerticalButton.Click += delegate { TransformCurrent(RotateFlipType.RotateNoneFlipY, "Flipped vertical."); };
+
             _markerButton.CheckOnClick = true;
             _markerButton.CheckedChanged += delegate
             {
@@ -152,12 +164,14 @@ namespace WinCapSimple
             AddColorItem(colorButton, "Black", Color.FromArgb(20, 22, 25));
 
             _widthCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            _widthCombo.Width = 58;
+            _widthCombo.Width = 64;
+            _widthCombo.Items.Add("1 px");
             _widthCombo.Items.Add("3 px");
             _widthCombo.Items.Add("6 px");
             _widthCombo.Items.Add("10 px");
             _widthCombo.Items.Add("16 px");
-            _widthCombo.SelectedIndex = 1;
+            _widthCombo.Items.Add("24 px");
+            _widthCombo.SelectedIndex = 2;
             _widthCombo.SelectedIndexChanged += delegate { UpdateMarkerWidth(); };
 
             ToolStripButton clearButton = new ToolStripButton("Clear Marks");
@@ -182,9 +196,14 @@ namespace WinCapSimple
             toolStrip.Items.Add(copyButton);
             toolStrip.Items.Add(saveButton);
             toolStrip.Items.Add(new ToolStripSeparator());
+            toolStrip.Items.Add(rotateLeftButton);
+            toolStrip.Items.Add(rotateRightButton);
+            toolStrip.Items.Add(flipHorizontalButton);
+            toolStrip.Items.Add(flipVerticalButton);
+            toolStrip.Items.Add(new ToolStripSeparator());
             toolStrip.Items.Add(_markerButton);
             toolStrip.Items.Add(colorButton);
-            toolStrip.Items.Add(new ToolStripLabel("Width"));
+            toolStrip.Items.Add(new ToolStripLabel("Marker width"));
             toolStrip.Items.Add(_widthCombo);
             toolStrip.Items.Add(clearButton);
 
@@ -239,15 +258,32 @@ namespace WinCapSimple
         private void UpdateMarkerWidth()
         {
             string selected = _widthCombo.SelectedItem as string;
+            string number;
+            int spaceIndex;
+            int width;
             if (selected == null)
             {
                 return;
             }
 
-            if (selected.StartsWith("3")) _canvas.MarkerWidth = 3.0f;
-            if (selected.StartsWith("6")) _canvas.MarkerWidth = 6.0f;
-            if (selected.StartsWith("10")) _canvas.MarkerWidth = 10.0f;
-            if (selected.StartsWith("16")) _canvas.MarkerWidth = 16.0f;
+            spaceIndex = selected.IndexOf(' ');
+            number = spaceIndex > 0 ? selected.Substring(0, spaceIndex) : selected;
+            if (int.TryParse(number, out width))
+            {
+                _canvas.MarkerWidth = width;
+            }
+        }
+
+        private void TransformCurrent(RotateFlipType rotateFlipType, string status)
+        {
+            if (_canvas.RotateFlipCurrent(rotateFlipType))
+            {
+                SetStatus(status);
+            }
+            else
+            {
+                SetStatus("Nothing to transform.");
+            }
         }
 
         private CaptureMode GetSelectedMode()

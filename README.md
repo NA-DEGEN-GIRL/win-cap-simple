@@ -69,7 +69,8 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 - 연사 캡처를 MP4 또는 GIF로 내보내기
 - 네이티브 연사 중 캡처 영역 외곽선 표시
 - Ctrl+C로 현재 캡처 복사, 넓은 붙여넣기 호환성을 위해 bitmap/DIB 포맷 제공
-- 기본 마커 도구
+- 캡처된 이미지 회전, 가로 대칭, 세로 대칭
+- 마커 도구와 1/3/6/10/16/24 px 굵기 선택
 - Layered 캡처 토글: 투명/오버레이 창 포함이 필요할 때만 사용
 - 카메라 스타일 앱 아이콘
 
@@ -106,6 +107,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 - 네이티브 burst 영역 표시는 캡처 루프와 분리된 click-through overlay로 한 번만 띄우며, 가능한 경우 Windows 캡처 제외 속성을 적용합니다.
 - 네이티브 디스플레이 연사는 가능한 경우 DXGI Output Duplication을 사용하고, 실패하면 GDI로 자동 fallback합니다.
 - 네이티브 DXGI 경로는 D3D11 device/context/output을 캐시하여 같은 디스플레이에서 두 번째 이후 burst 시작 비용을 줄입니다.
+- 마커 그리기는 배경 지우기를 피하고 더블버퍼링/부분 무효화를 사용해 드래그 중 깜빡임과 불필요한 재그리기를 줄입니다.
 - 기본 캡처는 `CAPTUREBLT`를 끕니다. Layered 토글을 켜면 투명/레이어드 창이 포함될 수 있지만 더 느릴 수 있습니다.
 - 자유형 마스크는 픽셀마다 전체 폴리곤을 검사하지 않고 스캔라인 구간 방식으로 처리합니다.
 - .NET SDK 빌드는 `PublishReadyToRun`을 사용합니다. Windows Forms는 NativeAOT/트리밍 경로와 맞지 않으므로 이 프로젝트의 초고속 경로는 네이티브 C 빌드입니다.
@@ -223,7 +225,8 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 - Export burst captures to MP4 or GIF
 - Native burst shows a capture-area outline while recording
 - Ctrl+C copies the current capture and publishes bitmap/DIB formats for broad paste compatibility
-- Basic marker tool
+- Rotate captured images and flip them horizontally or vertically
+- Marker tool with 1/3/6/10/16/24 px width options
 - Layered capture toggle: enable only when transparent or overlay windows must be included
 - Camera-style app icon
 
@@ -260,6 +263,7 @@ build\dotnet-r2r\        .NET 10 ReadyToRun WinForms publish
 - The native burst outline is a one-time click-through overlay outside the capture loop, with Windows capture exclusion applied when available.
 - Native display burst uses DXGI Output Duplication when available and automatically falls back to GDI.
 - The native DXGI path caches the D3D11 device, context, and output to reduce startup cost for later bursts on the same display.
+- Marker drawing avoids background erases and uses double buffering/partial invalidation to reduce flicker and unnecessary repainting while dragging.
 - Default capture leaves `CAPTUREBLT` off. The Layered toggle may include transparent or layered windows, but can be slower.
 - Freeform masking uses scanline spans instead of testing the full polygon per pixel.
 - The .NET SDK build uses `PublishReadyToRun`. Windows Forms does not fit the NativeAOT/trimming path, so the native C build remains this project's fastest path.
