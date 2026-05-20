@@ -10,9 +10,9 @@ Lightweight Windows screenshot/burst-capture tool. The goal is faster cold start
 
 | Build | Script | Output | Notes |
 |---|---|---|---|
-| Native Win32 (C) | `build-native.ps1` | `build\WinCapNative.exe` (~30 KB) | `/NODEFAULTLIB`, no CRT. The target for capture changes. |
-| .NET Framework | `build.ps1` | `build\WinCapSimple.exe` (~37 KB) | Builds with system `csc.exe`, no SDK needed. |
-| .NET 10 R2R | `build-dotnet.ps1` | `build\dotnet-r2r\WinCapSimple.exe` | Requires .NET 10 SDK. |
+| Native Win32 (C) | `build-native.ps1` | `build\ㅋㅊ.exe` (~30 KB) | `/NODEFAULTLIB`, no CRT. The target for capture changes. |
+| .NET Framework | `build.ps1` | `build\netfx\ㅋㅊ.exe` (~37 KB) | Builds with system `csc.exe`, no SDK needed. |
+| .NET 10 R2R | `build-dotnet.ps1` | `build\dotnet-r2r\ㅋㅊ.exe` | Requires .NET 10 SDK. |
 
 Native build requires Visual Studio Build Tools (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`).
 
@@ -46,10 +46,10 @@ tools/make-icon.ps1       Icon generator
 Run before committing capture-path changes.
 
 ```powershell
-.\build\WinCapNative.exe --self-test
-.\build\WinCapNative.exe --self-test-dxgi
-.\build\WinCapSimple.exe --self-test
-.\build\dotnet-r2r\WinCapSimple.exe --self-test
+.\build\ㅋㅊ.exe --self-test
+.\build\ㅋㅊ.exe --self-test-dxgi
+.\build\netfx\ㅋㅊ.exe --self-test
+.\build\dotnet-r2r\ㅋㅊ.exe --self-test
 ```
 
 Exit codes: `0` pass, `1` capture/save failed, `2` DXGI path did not run or second burst failed.
